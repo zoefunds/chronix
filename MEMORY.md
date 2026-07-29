@@ -64,11 +64,26 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   to "fix" this to `py-genlayer:test` (matching the local CLI's scaffold default) was wrong;
   the pinned-hash + version-line form is what actually works against this deployment target.
 - **Redis**: optional fail-open read cache (`backend/src/lib/cache.ts`), Upstash-backed, real
-  URL only in gitignored `backend/.env`, never committed. Not load-bearing.
-- **Backend**: Fly.io config ready (`backend/fly.toml`), not yet deployed — in progress.
-- **Frontend**: Vercel config ready (`frontend/vercel.json`), not yet deployed — in progress.
-- **Database**: local dev via `docker-compose.yml` (Postgres + backend). Production Postgres
-  target TBD — `DATABASE_URL` env var is the integration point either way.
+  URL only in gitignored `backend/.env` and as a Fly secret, never committed. Not load-bearing.
+- **Backend**: **DEPLOYED** — https://chronix-backend.fly.dev, Fly app `chronix-backend`,
+  2 machines (iad + lhr), `fly-postgres` cluster `chronix-db` (single node, iad — see gotcha
+  below) attached via `DATABASE_URL`. All secrets set via `fly secrets set` (JWT_SECRET,
+  CONTRACT_ADDRESS, GENLAYER_RPC_URL, GENLAYER_CHAIN_ID, SIWE_DOMAIN, SIWE_URI, CORS_ORIGIN,
+  REDIS_URL). `GENLAYER_KEEPER_PRIVATE_KEY` is NOT set — the keeper job no-ops (logs a warning)
+  until a funded keeper account is generated and set; markets can still be advanced manually by
+  any wallet calling `request_adjudication`/`settle` directly in the meantime.
+- **Frontend**: **DEPLOYED** — https://chronix-app.vercel.app, Vercel project `chronix`
+  (scope `adebiyi2002gmailcoms-projects`). SSO deployment protection disabled (was blocking
+  public access by default). Vercel auto-generates a second default domain
+  (`chronix-ecru.vercel.app` or similar) on every prod deploy — remove it after each deploy
+  with `vercel alias rm <that-domain> --yes --scope adebiyi2002gmailcoms-projects` and re-point
+  `chronix-app.vercel.app` to the new deployment URL with `vercel alias set`, since aliases
+  don't auto-follow new deployments.
+- **Database**: production is Fly Postgres (`chronix-db`, single-node — NOT highly available;
+  an iad regional outage takes down the DB even though the app machines are split iad/lhr. Fine
+  for now, worth upgrading to a 3-node cluster before real usage volume). Migrations applied via
+  `fly ssh console -a chronix-backend -C "node dist/db/migrate.js"` after each deploy that adds
+  one. Local dev still uses `docker-compose.yml`.
 
 ## Known gotchas / hard-won lessons
 
@@ -86,37 +101,48 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   transfer. Reversing this order (transfer-then-zero) is a reentrancy/double-spend bug class;
   every payout path must follow the same order and guard against `amount <= 0` at entry so a
   replayed call after zeroing reverts cleanly instead of silently doing nothing.
+- **Dockerfile build-context bug**: `backend/Dockerfile` needs the REPO ROOT as build context
+  (so it can `COPY database ./database`), but its COPY lines for package.json/src must then be
+  prefixed `backend/`. Deploy accordingly: `fly deploy --dockerfile backend/Dockerfile` from
+  the repo root will NOT work directly with `--config backend/fly.toml` (flyctl joins
+  `--dockerfile` onto the config's directory even for absolute paths — a real flyctl quirk, not
+  a typo). Workaround: `cp backend/fly.toml ./fly.toml` temporarily, deploy from repo root with
+  `fly deploy --dockerfile backend/Dockerfile --remote-only`, then `rm fly.toml`.
+- **migrate.js path bug (fixed)**: `backend/src/db/migrate.ts`'s migrations-directory resolution
+  assumed the same directory depth in both local dev (tsx, runs from src/) and the compiled
+  Docker image (dist/) — they differ by one level. Now tries both candidate paths.
+- Vercel SSO deployment protection is ON by default for new projects and silently blocks all
+  public traffic behind a login wall — always check/disable with
+  `vercel project protection disable <project> --sso --scope <scope>` after first deploy.
 
 ## Open TODOs
 
-- [x] User deploys `contracts/chronix.py` via GenLayer Studio and provides the address.
-- [x] Wire `CONTRACT_ADDRESS` into `backend/.env` and `frontend/.env`.
-- [x] Rewrote `backend/src/genlayer/client.ts` on the real `genlayer-js` SDK (`createClient`,
-      `readContract`/`writeContract`/`waitForTransactionReceipt`, `chains.studionet`), fixed
-      the `get_market_state` -> `get_market` drift, and corrected the backend/frontend trust
-      model (see note above). Added `chainIndexer.ts` job. All 17 backend integration tests
-      pass against a fresh Postgres.
-- [~] Frontend GenLayer wallet wiring — PARTIAL, be precise about this with the user:
-      - [x] `frontend/src/lib/genlayer.ts` built: browser-side genlayer-js client bound to
-        the connected wallet's EIP-1193 provider (`chains.studionet`), covering
-        createMarket/stake/submitEvidencePointer/claimPayout/claimTimeoutRefund/cancelMarket.
-      - [x] `frontend/src/lib/api.ts` updated to match the backend's real response envelopes
-        (`{market}`, `{markets,total}`, `{positions}`, `{evidence}`) and the new
-        contractMarketId+txHash "record what already happened on-chain" contract.
-      - [x] `CreateMarket.tsx` fully wired end-to-end as the reference implementation: user's
-        wallet signs create_market -> waits for receipt -> reads market id -> POSTs to backend.
-      - [ ] NOT yet wired: `MarketDetail.tsx`'s Stake YES/NO buttons, evidence submission,
-        claim payout / claim timeout refund / cancel market buttons, and the Discover /
-        Portfolio / EvidenceLedger / AdjudicationResult pages still render `mockData.ts`
-        instead of calling the (now-correct) `api.ts`. The pattern to follow for each is
-        exactly what `CreateMarket.tsx` now does — sign via `genlayer.ts`, wait for receipt,
-        then POST the proof to the matching backend endpoint.
-- [ ] Provision production Postgres and set `DATABASE_URL` for the Fly deploy.
-- [ ] Run `fly deploy` from `backend/`.
-- [ ] Run `vercel --prod` from `frontend/` (target project name: `chronix` or `chronix-app`,
-      per user request 2026-07-29).
+- [x] Contract deployed, address wired everywhere.
+- [x] Backend rewritten on real `genlayer-js` SDK, correct trust model (backend never signs
+      money-moving writes), `chainIndexer.ts` reconciliation job. 17/17 tests pass.
 - [x] Chronix rename applied across repo/docs/env defaults. Frontend logo mark still needs a
       visual redesign pass (currently just renamed text, not a new mark).
+- [x] Backend deployed to Fly.io (2 machines, migrated). Frontend deployed to Vercel
+      (chronix-app.vercel.app).
+- [x] Discover, MarketDetail (including the Stake YES/NO buttons — real wallet-signed
+      `stake()` calls), CreateMarket, and Evidence Ledger all wired to live backend/chain data.
+- [ ] **Still on mock data** (`frontend/src/lib/mockData.ts`, decoupled into local `Mock*`
+      types so they don't block the build): **Portfolio.tsx** and **AdjudicationResult.tsx**.
+      These need real backend support that doesn't exist yet, not just a frontend wiring pass:
+      - Portfolio needs claimable-amount computation (requires reading `get_stake()` /
+        `claim_payout` eligibility per position from chain, not just mirrored Postgres rows).
+      - AdjudicationResult needs the actual verdict reasoning (source weights, timeline) —
+        this data lives in the GenVM nondet execution trace, which nothing in this backend
+        currently reads or stores. Would need a new backend capability to fetch/parse that
+        trace (likely via `debugTraceTransaction` in genlayer-js) before this page can be real.
+      - Landing.tsx's "featured markets" section also still reads `mockMarkets` for its
+        preview cards — lower priority, cosmetic only.
+      - claimPayout/claimTimeoutRefund/cancelMarket buttons don't exist in the UI yet at all
+        (only implemented in `frontend/src/lib/genlayer.ts`, not called from any page).
+- [ ] Generate + fund a `GENLAYER_KEEPER_PRIVATE_KEY` so `request_adjudication`/`settle` run
+      fully automatically instead of requiring a manual wallet call once a market's deadline
+      passes.
+- [ ] Fly Postgres is single-node — no HA. Consider a 3-node cluster before real usage.
 - [ ] Review contract test coverage once `contracts/tests/` lands — GenVM likely can't run
       under pytest directly, so tests target the pure-logic helpers (bps math, ledger-zeroing
       order, state-machine transitions) extracted for testability.
