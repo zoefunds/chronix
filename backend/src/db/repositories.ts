@@ -331,6 +331,48 @@ export async function listEvidenceForMarket(marketId: string): Promise<EvidenceR
   return res.rows;
 }
 
+export interface EvidenceWithMarket extends EvidenceRow {
+  market_question: string;
+}
+
+/** Global evidence feed across every market, newest first — powers the Evidence Ledger page. */
+export async function listAllEvidence(params: {
+  sourceType?: string;
+  limit: number;
+  offset: number;
+}): Promise<{ rows: EvidenceWithMarket[]; total: number }> {
+  const conditions: string[] = [];
+  const queryParams: unknown[] = [];
+
+  if (params.sourceType) {
+    queryParams.push(params.sourceType);
+    conditions.push(`e.source_type = $${queryParams.length}`);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const countRes = await query<{ count: string }>(
+    `SELECT count(*)::text as count FROM evidence e ${whereClause}`,
+    queryParams
+  );
+
+  queryParams.push(params.limit);
+  const limitIdx = queryParams.length;
+  queryParams.push(params.offset);
+  const offsetIdx = queryParams.length;
+
+  const res = await query<EvidenceWithMarket>(
+    `SELECT e.*, m.question AS market_question
+     FROM evidence e
+     JOIN markets m ON m.id = e.market_id
+     ${whereClause}
+     ORDER BY e.created_at DESC
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    queryParams
+  );
+
+  return { rows: res.rows, total: Number(countRes.rows[0]?.count ?? 0) };
+}
+
 export async function insertEvidence(params: {
   marketId: string;
   sourceType: string;

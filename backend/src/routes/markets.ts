@@ -12,6 +12,7 @@ import {
   insertMarket,
   insertMarketEvent,
   insertPosition,
+  listAllEvidence,
   listEvidenceForMarket,
   listEventsForMarket,
   listMarkets,
@@ -22,6 +23,16 @@ import { cacheGetOrSet } from "../lib/cache.js";
 import { env } from "../config.js";
 
 export async function marketsRoutes(fastify: FastifyInstance) {
+  // GET /evidence — global feed across every market, newest first. Powers
+  // the Evidence Ledger page. Read-only, no auth required.
+  fastify.get("/evidence", async (request, reply) => {
+    const q = request.query as { sourceType?: string; limit?: string; offset?: string };
+    const limit = Math.min(Number(q.limit) || 50, 200);
+    const offset = Number(q.offset) || 0;
+    const { rows, total } = await listAllEvidence({ sourceType: q.sourceType, limit, offset });
+    return reply.send({ evidence: rows, total, limit, offset });
+  });
+
   // GET /markets — list + filter by horizon/category/status
   fastify.get("/markets", async (request, reply) => {
     const q = marketsQuerySchema.parse(request.query);

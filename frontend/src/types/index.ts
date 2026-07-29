@@ -86,6 +86,11 @@ export interface Evidence {
   created_at: string
 }
 
+/** GET /evidence (global feed) row — Evidence plus the market's question, joined server-side. */
+export interface EvidenceWithMarket extends Evidence {
+  market_question: string
+}
+
 export interface AdjudicationResult {
   marketId: string
   verdict: 'yes' | 'no' | 'undetermined'

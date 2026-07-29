@@ -2,6 +2,7 @@ import type {
   AdjudicationResult,
   CreateMarketPayload,
   Evidence,
+  EvidenceWithMarket,
   Market,
   Portfolio,
   Position,
@@ -116,6 +117,14 @@ export const api = {
       token,
     )
     return res.position
+  },
+
+  /** GET /evidence — global feed across every market. */
+  async listAllEvidence(filters: { sourceType?: string } = {}) {
+    const res = await request<{ evidence: EvidenceWithMarket[]; total: number }>(
+      `/evidence${toQuery(filters)}`
+    )
+    return res.evidence
   },
 
   /** GET /markets/:id/evidence */
