@@ -1,0 +1,32 @@
+@import 'tailwindcss';
+@config '../tailwind.config.ts';
+
+@theme {
+  --font-display: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-label: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    background-color: #0b1326;
+  }
+  body {
+    @apply bg-surface text-on-surface font-body text-body-md antialiased;
+    margin: 0;
+  }
+  ::selection {
+    @apply bg-secondary text-on-secondary;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: #334155;
+    border-radius: 9999px;
+  }
+}
