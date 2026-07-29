@@ -1,8 +1,8 @@
-# fly.toml — EchoMarkets backend
+# fly.toml — Chronix backend
 # Deploy from repo root: fly deploy --config backend/fly.toml --dockerfile backend/Dockerfile
 # (build context must be the repo root so `database/` migrations are included; see scripts/deploy-fly.sh)
 
-app = "echomarkets-backend"
+app = "chronix-backend"
 primary_region = "iad"
 kill_signal = "SIGTERM"
 kill_timeout = "10s"

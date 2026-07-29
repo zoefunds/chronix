@@ -1,4 +1,4 @@
-# EchoMarkets — Architecture & Planning
+# Chronix — Architecture & Planning
 
 Locked decisions (approved by user 2026-07-29):
 - **DB**: PostgreSQL, run via Docker locally and in production.

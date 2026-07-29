@@ -1,8 +1,8 @@
 /**
  * GenLayer client wrapper, backed by the official genlayer-js SDK.
  *
- * Wraps calls to the deployed EchoMarkets Intelligent Contract
- * (contracts/echo_markets.py), deployed at CONTRACT_ADDRESS on GenLayer
+ * Wraps calls to the deployed Chronix Intelligent Contract
+ * (contracts/chronix.py), deployed at CONTRACT_ADDRESS on GenLayer
  * Studio/StudioNet — see MEMORY.md for the deployed address.
  *
  * Trust model (read before adding a call here):

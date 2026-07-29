@@ -14,7 +14,7 @@ export const wagmiConfig = createConfig({
     ...(walletConnectProjectId
       ? [walletConnect({ projectId: walletConnectProjectId, showQrModal: true })]
       : []),
-    coinbaseWallet({ appName: 'EchoMarkets' }),
+    coinbaseWallet({ appName: 'Chronix' }),
   ],
   transports: {
     [mainnet.id]: http(rpcUrl || undefined),

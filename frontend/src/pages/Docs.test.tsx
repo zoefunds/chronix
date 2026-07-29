@@ -5,7 +5,7 @@ import Docs from './Docs'
 describe('Docs page', () => {
   it('renders the how-it-works heading and key sections', () => {
     render(<Docs />)
-    expect(screen.getByText('How EchoMarkets works')).toBeInTheDocument()
+    expect(screen.getByText('How Chronix works')).toBeInTheDocument()
     expect(screen.getByText('Wallet-only identity')).toBeInTheDocument()
     expect(screen.getByText('Escrow model')).toBeInTheDocument()
   })

@@ -30,7 +30,7 @@ async function main() {
   process.on("SIGINT", () => void shutdown("SIGINT"));
 
   await app.listen({ port: env.PORT, host: env.HOST });
-  logger.info({ port: env.PORT }, "EchoMarkets backend listening");
+  logger.info({ port: env.PORT }, "Chronix backend listening");
 }
 
 main().catch((err) => {

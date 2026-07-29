@@ -38,7 +38,7 @@ export default function Landing() {
           Bet on how history will remember an event.
         </h1>
         <p className="font-body text-body-lg text-on-surface-variant max-w-xl">
-          EchoMarkets is a prediction market adjudicated by a GenLayer Intelligent Contract over
+          Chronix is a prediction market adjudicated by a GenLayer Intelligent Contract over
           long time horizons — 3, 5, 10 years, or permanent. No moderators. No editorial board.
           Just weighted, source-verified consensus, settled on-chain.
         </p>

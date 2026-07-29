@@ -1,9 +1,9 @@
 {
-  "name": "echomarkets-backend",
+  "name": "chronix-backend",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "EchoMarkets backend API, job workers, and GenLayer client wrapper.",
+  "description": "Chronix backend API, job workers, and GenLayer client wrapper.",
   "engines": {
     "node": ">=20"
   },

@@ -2,7 +2,7 @@
 // supply required env vars before any application module is imported.
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? "postgres://echomarkets:echomarkets@localhost:5450/echomarkets_test";
+  process.env.TEST_DATABASE_URL ?? "postgres://chronix:chronix@localhost:5450/chronix_test";
 process.env.JWT_SECRET = "test-secret";
 process.env.CORS_ORIGIN = "http://localhost:5173";
 process.env.CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS ?? ""; // unset by default in tests

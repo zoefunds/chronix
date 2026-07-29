@@ -1,5 +1,5 @@
 -- 001_init.sql
--- EchoMarkets initial schema.
+-- Chronix initial schema.
 -- Postgres 14+.
 
 BEGIN;

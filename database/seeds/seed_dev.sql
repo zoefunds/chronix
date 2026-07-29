@@ -26,7 +26,7 @@ WITH m1 AS (
 m2 AS (
     INSERT INTO markets (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at)
     VALUES (
-        'Will the 2026 EchoMarkets launch be remembered as a milestone in prediction markets?',
+        'Will the 2026 Chronix launch be remembered as a milestone in prediction markets?',
         'crypto',
         3,
         'Resolved by majority sentiment across specialist crypto press and academic citation trends 3 years post-launch.',

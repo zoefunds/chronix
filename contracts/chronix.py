@@ -325,9 +325,9 @@ class Market:
     evidence_count: u256
 
 
-class EchoMarkets(gl.Contract):
+class Chronix(gl.Contract):
     """
-    Single Intelligent Contract backing every EchoMarkets prediction
+    Single Intelligent Contract backing every Chronix prediction
     market. Public method surface matches PLANNING.md's "GenLayer contract
     responsibilities" list exactly: create_market, stake,
     submit_evidence_pointer, request_adjudication, settle, claim_payout,
@@ -1036,7 +1036,7 @@ class _GenRecipient:
     decorator for any address-shaped interface stub with empty View/Write
     inner classes, matching the confirmed working pattern (independently
     verified against a real deployed GenLayer contract). All money leaves
-    this contract through exactly one call site (`EchoMarkets._send_gen`),
+    this contract through exactly one call site (`Chronix._send_gen`),
     which is what makes the zero-before-transfer ordering auditable in one
     place.
     """

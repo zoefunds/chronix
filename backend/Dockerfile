@@ -26,7 +26,7 @@ FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
-RUN addgroup -S echomarkets && adduser -S echomarkets -G echomarkets
+RUN addgroup -S chronix && adduser -S chronix -G chronix
 
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -34,7 +34,7 @@ COPY package.json ./
 # Migrations live in the repo-level database/ dir, one level above backend/.
 COPY database ./database
 
-USER echomarkets
+USER chronix
 
 EXPOSE 8080
 

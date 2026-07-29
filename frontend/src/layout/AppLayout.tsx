@@ -22,7 +22,7 @@ export default function AppLayout() {
             className="flex items-center gap-2 font-headline text-headline-md font-bold text-primary tracking-tight"
           >
             <Logo size={22} />
-            EchoMarkets
+            Chronix
           </button>
           <nav className="hidden lg:flex items-center gap-6">
             {navItems.map((item) => (
@@ -63,9 +63,9 @@ export default function AppLayout() {
       <footer className="border-t border-outline-variant py-6 px-4 md:px-margin-desktop">
         <div className="max-w-container-max mx-auto flex flex-col md:flex-row justify-between items-center gap-2 text-body-sm text-on-surface-variant">
           <span className="font-label text-label-sm uppercase tracking-widest">
-            EchoMarkets · adjudicated by GenLayer Intelligent Contracts
+            Chronix · adjudicated by GenLayer Intelligent Contracts
           </span>
-          <span className="font-label text-label-sm text-on-surface-variant">© 2026 EchoMarkets</span>
+          <span className="font-label text-label-sm text-on-surface-variant">© 2026 Chronix</span>
         </div>
       </footer>
     </div>

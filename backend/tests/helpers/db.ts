@@ -9,7 +9,7 @@ const migrationsDir = path.resolve(__dirname, "../../../database/migrations");
 export function getTestDatabaseUrl(): string {
   return (
     process.env.TEST_DATABASE_URL ??
-    "postgres://echomarkets:echomarkets@localhost:5450/echomarkets_test"
+    "postgres://chronix:chronix@localhost:5450/chronix_test"
   );
 }
 

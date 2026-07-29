@@ -17,7 +17,7 @@ interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
-const STORAGE_KEY = 'echomarkets.siwe.session'
+const STORAGE_KEY = 'chronix.siwe.session'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { address, chainId } = useAccount()
@@ -49,7 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const siweMessage = new SiweMessage({
         domain: window.location.host,
         address,
-        statement: 'Sign in to EchoMarkets with your wallet. No email or password required.',
+        statement: 'Sign in to Chronix with your wallet. No email or password required.',
         uri: window.location.origin,
         version: '1',
         chainId: chainId ?? 1,

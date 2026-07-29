@@ -1,6 +1,6 @@
 -- Consolidated reference schema. Generated from migrations/001_init.sql + 002_functions.sql.
 -- 001_init.sql
--- EchoMarkets initial schema.
+-- Chronix initial schema.
 -- Postgres 14+.
 
 BEGIN;

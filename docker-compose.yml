@@ -10,15 +10,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: echomarkets
-      POSTGRES_PASSWORD: echomarkets
-      POSTGRES_DB: echomarkets
+      POSTGRES_USER: chronix
+      POSTGRES_PASSWORD: chronix
+      POSTGRES_DB: chronix
     ports:
       - "5432:5432"
     volumes:
-      - echomarkets_pgdata:/var/lib/postgresql/data
+      - chronix_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U echomarkets -d echomarkets"]
+      test: ["CMD-SHELL", "pg_isready -U chronix -d chronix"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -35,7 +35,7 @@ services:
       NODE_ENV: development
       PORT: 8080
       HOST: 0.0.0.0
-      DATABASE_URL: postgres://echomarkets:echomarkets@postgres:5432/echomarkets
+      DATABASE_URL: postgres://chronix:chronix@postgres:5432/chronix
       DATABASE_SSL: "false"
       JWT_SECRET: dev-only-secret-change-me
       SIWE_DOMAIN: localhost
@@ -53,4 +53,4 @@ services:
       start_period: 10s
 
 volumes:
-  echomarkets_pgdata:
+  chronix_pgdata:

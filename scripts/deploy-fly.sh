@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# deploy-fly.sh — deploy the EchoMarkets backend to Fly.io.
+# deploy-fly.sh — deploy the Chronix backend to Fly.io.
 #
 # IMPORTANT: This script is intentionally NOT executed automatically by any
 # agent/tooling. Review it and run it yourself once you're ready to deploy.
 #
 # Prerequisites:
 #   - `fly` CLI installed and authenticated (`fly auth login`)
-#   - Fly app created once: `fly apps create echomarkets-backend`
+#   - Fly app created once: `fly apps create chronix-backend`
 #   - Secrets set (see below) before the first deploy
 #   - Build context MUST be the repo root (not backend/) because the backend
 #     Dockerfile COPYs ../database/ migrations into the image.
@@ -19,7 +19,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> EchoMarkets backend Fly.io deploy"
+echo "==> Chronix backend Fly.io deploy"
 echo "Repo root (build context): $REPO_ROOT"
 
 if ! command -v fly >/dev/null 2>&1; then
@@ -33,7 +33,7 @@ echo "  fly secrets set DATABASE_URL=postgres://... --config backend/fly.toml"
 echo "  fly secrets set JWT_SECRET=\$(openssl rand -hex 32) --config backend/fly.toml"
 echo "  fly secrets set CONTRACT_ADDRESS=0x... --config backend/fly.toml   # once contract is deployed"
 echo "  fly secrets set GENLAYER_RPC_URL=https://studio.genlayer.com/api --config backend/fly.toml"
-echo "  fly secrets set CORS_ORIGIN=https://echomarkets.vercel.app --config backend/fly.toml"
+echo "  fly secrets set CORS_ORIGIN=https://chronix.vercel.app --config backend/fly.toml"
 echo
 
 # NOTE: `fly deploy` is deliberately NOT invoked by this script automatically

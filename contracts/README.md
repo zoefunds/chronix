@@ -1,19 +1,19 @@
-# echo_markets.py — GenLayer Intelligent Contract
+# chronix.py — GenLayer Intelligent Contract
 
-Single Intelligent Contract for EchoMarkets, targeting GenLayer Studio /
+Single Intelligent Contract for Chronix, targeting GenLayer Studio /
 StudioNet, gas token GEN. Not yet deployed — deploy manually and set
 `CONTRACT_ADDRESS` in `.env` once you have an address.
 
 ## File layout
 
-`contracts/echo_markets.py` is split into two halves:
+`contracts/chronix.py` is split into two halves:
 
 1. **Pure logic** (top of file, above `# END PURE LOGIC`) — plain Python
    functions with no `gl.*` calls, no storage access, no nondeterminism.
    These implement the state machine, payout math, and key-building
    helpers, and are meant to be imported and unit-tested directly with
    pytest (GenVM itself cannot run inside a normal pytest process).
-2. **Contract** — the `EchoMarkets(gl.Contract)` class. Every write method
+2. **Contract** — the `Chronix(gl.Contract)` class. Every write method
    is a thin adapter around the pure helpers, plus the `gl.*` calls that
    actually touch storage, `gl.message`, or nondeterministic web/LLM
    primitives.
@@ -93,12 +93,12 @@ specified in the build brief rather than guessing at unconfirmed syntax:
   a deadline check *more* conservative — it never trusts a caller-supplied
   timestamp.
 
-Both are called out inline in `echo_markets.py` with full reasoning; there
+Both are called out inline in `chronix.py` with full reasoning; there
 are no unresolved TODOs in the file.
 
 ## Testing
 
-Pure functions (prefixed `pure_`) in the top half of `echo_markets.py` are
+Pure functions (prefixed `pure_`) in the top half of `chronix.py` are
 plain Python and can be imported directly by pytest — no GenVM required.
 gl-dependent methods require the GenLayer `gltest` harness / GenLayer
 Studio to execute.

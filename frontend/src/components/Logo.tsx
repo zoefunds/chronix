@@ -6,7 +6,7 @@ interface LogoProps {
 /**
  * Hourglass / echo-wave logo mark. Emerald (#4edea3) on the dark
  * surface (#0b1326) — mirrors public/favicon.svg. Used next to (not
- * replacing) the "EchoMarkets" wordmark in the app header.
+ * replacing) the "Chronix" wordmark in the app header.
  */
 export default function Logo({ size = 24, className = '' }: LogoProps) {
   return (
@@ -17,7 +17,7 @@ export default function Logo({ size = 24, className = '' }: LogoProps) {
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       role="img"
-      aria-label="EchoMarkets logo"
+      aria-label="Chronix logo"
     >
       <rect width="32" height="32" rx="6" fill="#0b1326" />
       <path d="M10 7H22" stroke="#4edea3" strokeWidth="1.6" strokeLinecap="round" />

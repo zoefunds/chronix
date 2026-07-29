@@ -2,8 +2,8 @@ import { Card, Label } from '../components/ui'
 
 const sections = [
   {
-    title: 'What is EchoMarkets?',
-    body: 'EchoMarkets is a prediction market where participants stake on how history will remember an event — a decade, a policy, a technology, a cultural moment. Unlike short-horizon prediction markets, resolution windows are long: 3, 5, 10 years, or permanent (re-checked periodically forever).',
+    title: 'What is Chronix?',
+    body: 'Chronix is a prediction market where participants stake on how history will remember an event — a decade, a policy, a technology, a cultural moment. Unlike short-horizon prediction markets, resolution windows are long: 3, 5, 10 years, or permanent (re-checked periodically forever).',
   },
   {
     title: 'Wallet-only identity',
@@ -11,7 +11,7 @@ const sections = [
   },
   {
     title: 'Escrow model',
-    body: 'Staked GEN is held on-chain by the GenLayer Intelligent Contract, never by EchoMarkets\' servers. Ledger fields are zeroed before any transfer, and all money movement funnels through a single, auditable transfer chokepoint in the contract. Exit paths exist for settlement, disputes, timeout-reclaim, and pre-participation cancellation.',
+    body: 'Staked GEN is held on-chain by the GenLayer Intelligent Contract, never by Chronix\' servers. Ledger fields are zeroed before any transfer, and all money movement funnels through a single, auditable transfer chokepoint in the contract. Exit paths exist for settlement, disputes, timeout-reclaim, and pre-participation cancellation.',
   },
   {
     title: 'Adjudication model',
@@ -32,7 +32,7 @@ export default function Docs() {
     <div className="max-w-3xl mx-auto flex flex-col gap-6">
       <div>
         <Label>Documentation</Label>
-        <h1 className="font-headline text-headline-lg text-primary mt-1">How EchoMarkets works</h1>
+        <h1 className="font-headline text-headline-lg text-primary mt-1">How Chronix works</h1>
       </div>
       {sections.map((s) => (
         <Card key={s.title} className="p-4">
