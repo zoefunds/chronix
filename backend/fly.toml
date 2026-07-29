@@ -1,0 +1,50 @@
+# fly.toml — EchoMarkets backend
+# Deploy from repo root: fly deploy --config backend/fly.toml --dockerfile backend/Dockerfile
+# (build context must be the repo root so `database/` migrations are included; see scripts/deploy-fly.sh)
+
+app = "echomarkets-backend"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  LOG_LEVEL = "info"
+
+# Secrets (set via `fly secrets set`, not committed):
+#   DATABASE_URL, JWT_SECRET, CONTRACT_ADDRESS, GENLAYER_RPC_URL, CORS_ORIGIN
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 2
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Redundancy: run at least 2 machines across regions for 24/7 availability.
+# Scale/region example (run manually after first deploy):
+#   fly scale count 2 --region iad,lhr
+#   fly regions add lhr
+
+[processes]
+  app = "node dist/server.js"
+
+[[restart]]
+  policy = "always"
