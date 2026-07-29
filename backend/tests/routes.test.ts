@@ -47,7 +47,7 @@ describe("REST API — evidence submission & market lifecycle", () => {
     expect(body.db).toBe("up");
   });
 
-  it("creates a market intent that stays pending_chain until confirmed (never optimistic)", async () => {
+  it("records a market only after it was already confirmed on-chain (contractMarketId + txHash required)", async () => {
     const token = app.jwt.sign({ wallet: WALLET });
 
     const res = await app.inject({
@@ -60,17 +60,37 @@ describe("REST API — evidence submission & market lifecycle", () => {
         horizonYears: 10,
         resolutionCriteria: "Resolved by consensus of independent retrospectives.",
         resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-        initialLiquidityGen: "5.0",
+        contractMarketId: "42",
+        txHash: "0xabc123",
       },
     });
 
-    expect(res.statusCode).toBe(202);
+    expect(res.statusCode).toBe(201);
     const body = res.json();
-    expect(body.market.status).toBe("pending_chain");
-    expect(body.market.contract_market_id).toBeNull();
+    expect(body.market.status).toBe("open");
+    expect(body.market.contract_market_id).toBe("42");
   });
 
-  it("rejects market creation without auth", async () => {
+  it("rejects a market recording request missing the on-chain proof fields", async () => {
+    const token = app.jwt.sign({ wallet: WALLET });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/markets",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        question: "Missing on-chain proof?",
+        category: "test",
+        horizonYears: 1,
+        resolutionCriteria: "criteria text long enough",
+        resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
+        // contractMarketId / txHash intentionally omitted
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects market recording without auth", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/markets",
@@ -80,13 +100,14 @@ describe("REST API — evidence submission & market lifecycle", () => {
         horizonYears: 1,
         resolutionCriteria: "criteria text long enough",
         resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-        initialLiquidityGen: "1.0",
+        contractMarketId: "1",
+        txHash: "0xabc",
       },
     });
     expect(res.statusCode).toBe(401);
   });
 
-  it("submits evidence and records it as unconfirmed pending chain sync", async () => {
+  it("submits evidence (already on-chain) and records it as confirmed", async () => {
     const market = await insertMarket({
       question: "Will E happen?",
       category: "test",
@@ -94,6 +115,7 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
+      contractMarketId: "99",
     });
     await setMarketStatus(market.id, "open");
 
@@ -106,10 +128,11 @@ describe("REST API — evidence submission & market lifecycle", () => {
         sourceType: "news",
         url: "https://example.com/article",
         summary: "Some summary text",
+        txHash: "0xevidence1",
       },
     });
 
-    expect(res.statusCode).toBe(202);
+    expect(res.statusCode).toBe(201);
 
     const evidenceListRes = await app.inject({ method: "GET", url: `/markets/${market.id}/evidence` });
     const evidenceBody = evidenceListRes.json();
@@ -127,6 +150,7 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(), // future
+      contractMarketId: "100",
     });
     await setMarketStatus(market.id, "open");
 
@@ -145,6 +169,7 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
+      contractMarketId: "101",
     });
     await setMarketStatus(m1.id, "open");
 

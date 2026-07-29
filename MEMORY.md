@@ -38,6 +38,18 @@ deployment state, gotchas, and open TODOs for the EchoMarkets project.
   after BOTH wall-clock AND on-chain deadline check agree — never races ahead of chain truth).
   Chain-write reconciler (`chain_sync_queue` table + worker, retry with backoff, marks
   `market_events.confirmed` only after a real tx receipt).
+- **Trust model correction (2026-07-29, important)**: the backend NEVER holds a key that can
+  move user GEN. All money-moving contract methods (`create_market`, `stake`, `claim_payout`,
+  `claim_timeout_refund`, `cancel_market`) are signed directly by the end user's own wallet in
+  the frontend, using `genlayer-js` in the browser — the backend only records what already
+  happened on-chain (`POST /markets` and `POST /markets/:id/evidence` now require
+  `contractMarketId`/`txHash` as proof, they don't submit writes). The backend DOES hold one
+  narrow "keeper" key (`GENLAYER_KEEPER_PRIVATE_KEY`, optional) used only for two non-payable,
+  fully-permissionless automation calls: `request_adjudication` and `settle`. Any user's own
+  wallet could call those same methods with the same effect — the keeper is a convenience, not
+  a privileged actor. A separate `chainIndexer` job (`backend/src/jobs/chainIndexer.ts`)
+  periodically re-reads `get_market()` for every active market and reconciles Postgres to match
+  chain truth, independent of whether this backend was the one that triggered the transition.
 
 ## Deployment state
 
@@ -78,13 +90,20 @@ deployment state, gotchas, and open TODOs for the EchoMarkets project.
 
 - [x] User deploys `contracts/echo_markets.py` via GenLayer Studio and provides the address.
 - [x] Wire `CONTRACT_ADDRESS` into `backend/.env` and `frontend/.env`.
-- [ ] Confirm final ABI/param shapes returned by GenLayer Studio match the backend's
-      GenLayer client wrapper (`backend/src/genlayer/client.ts`) — fix the known
-      `get_market_state` -> `get_market` drift and verify all 8 method names against the
-      deployed contract.
+- [x] Rewrote `backend/src/genlayer/client.ts` on the real `genlayer-js` SDK (`createClient`,
+      `readContract`/`writeContract`/`waitForTransactionReceipt`, `chains.studionet`), fixed
+      the `get_market_state` -> `get_market` drift, and corrected the backend/frontend trust
+      model (see note above). Added `chainIndexer.ts` job. All 17 backend integration tests
+      pass against a fresh Postgres.
+- [ ] Wire the frontend to sign money-moving calls directly via `genlayer-js` + the user's
+      connected wallet (create_market, stake, submit_evidence_pointer, claim_payout,
+      claim_timeout_refund, cancel_market), then POST the resulting `contractMarketId`/`txHash`
+      to the backend to mirror it. Currently the frontend still has mock versions of these
+      flows from the initial scaffold.
 - [ ] Provision production Postgres and set `DATABASE_URL` for the Fly deploy.
 - [ ] Run `fly deploy` from `backend/`.
-- [ ] Run `vercel --prod` from `frontend/`.
+- [ ] Run `vercel --prod` from `frontend/` (target project name: `chronix` or `chronix-app`,
+      per user request 2026-07-29).
 - [ ] Chronix rename — still pending, not yet applied (see brand note at top of file).
 - [ ] Review contract test coverage once `contracts/tests/` lands — GenVM likely can't run
       under pytest directly, so tests target the pure-logic helpers (bps math, ledger-zeroing

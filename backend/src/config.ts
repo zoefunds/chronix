@@ -23,6 +23,15 @@ const envSchema = z.object({
   CONTRACT_ADDRESS: z.string().default(""),
   GENLAYER_RPC_URL: z.string().default("https://studio.genlayer.com/api"),
   GENLAYER_CHAIN_ID: z.coerce.number().int().default(61999),
+  // Backend-held keeper account. ONLY ever used to call non-payable, permissionless
+  // state-advancing methods (request_adjudication, settle) once their on-chain
+  // preconditions are already met — it never touches gl.message.value, never signs a
+  // create_market/stake/claim on a user's behalf, and never custodies user funds.
+  // Leave unset to disable the keeper job entirely (falls back to no automated
+  // settlement — markets can still be advanced by any user's own wallet calling the
+  // same public, permissionless contract methods).
+  GENLAYER_KEEPER_PRIVATE_KEY: z.string().optional(),
+  KEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(30000),
 
   // Optional. Best-effort read cache only (see src/lib/cache.ts) — never a
   // dependency for correctness. Leave unset to disable caching entirely.

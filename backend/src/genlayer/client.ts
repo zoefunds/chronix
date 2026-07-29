@@ -1,30 +1,31 @@
 /**
- * GenLayer client wrapper.
+ * GenLayer client wrapper, backed by the official genlayer-js SDK.
  *
- * Wraps calls to the deployed EchoMarkets Intelligent Contract (contracts/echo_markets.py)
- * over its StudioNet RPC. This module is the ONLY place in the backend that should
- * talk to the chain directly — everything else (routes, jobs) goes through here.
+ * Wraps calls to the deployed EchoMarkets Intelligent Contract
+ * (contracts/echo_markets.py), deployed at CONTRACT_ADDRESS on GenLayer
+ * Studio/StudioNet — see MEMORY.md for the deployed address.
  *
- * IMPORTANT / TODO(contract-wiring):
- *   - CONTRACT_ADDRESS is read from env and may be empty until the user deploys the
- *     contract manually (per PLANNING.md). All methods below throw a clear
- *     GenLayerNotConfiguredError until it is set.
- *   - The exact JSON-RPC method names, param encoding, and receipt polling scheme
- *     for GenLayer StudioNet are best-effort here, mirrored from the documented
- *     public methods in PLANNING.md (create_market, stake, submit_evidence_pointer,
- *     request_adjudication, settle, claim_payout, claim_timeout_refund, cancel_market).
- *     Once contracts/echo_markets.py is finalized and deployed, replace the
- *     `callContractMethod` / `readContractMethod` internals with the real
- *     genlayer-js (or genlayer-py-bridge) client calls and confirm:
- *       * exact method/function selector names on the deployed contract
- *       * payable value units (GEN, base units)
- *       * receipt/tx status field names returned by the StudioNet RPC
- *       * the "on-chain deadline check" read method name (assumed `get_market_state`
- *         returning a `resolves_at_passed: bool` field below — CONFIRM against
- *         actual contract source).
+ * Trust model (read before adding a call here):
+ *   - Money-moving methods (create_market, stake, claim_payout,
+ *     claim_timeout_refund, cancel_market) are ALWAYS signed by the end
+ *     user's own wallet, in the browser, via the frontend's genlayer-js
+ *     client — never here. This backend never holds a key that could move
+ *     user funds.
+ *   - This wrapper is used for: (a) read-only polling (getMarket, getStake,
+ *     getAllEvidence) so the API/DB can stay in sync without a wallet, and
+ *     (b) the keeper account (see genlayer/keeper.ts), which ONLY calls the
+ *     non-payable, fully-permissionless state-advancing methods
+ *     (request_adjudication, settle) once their on-chain preconditions are
+ *     already true — it is a convenience automation, not a privileged actor;
+ *     any user's wallet could call the exact same methods with the same
+ *     effect.
  */
+import { createClient, chains, createAccount } from "genlayer-js";
+import type { Address, Hash } from "genlayer-js/types";
 import { env } from "../config.js";
 import { logger } from "../lib/logger.js";
+
+type GLClient = ReturnType<typeof createClient>;
 
 export class GenLayerNotConfiguredError extends Error {
   constructor() {
@@ -33,95 +34,71 @@ export class GenLayerNotConfiguredError extends Error {
   }
 }
 
-export interface TxReceipt {
-  txHash: string;
-  status: "pending" | "success" | "failed";
-  blockNumber?: number;
-  raw?: unknown;
-}
+let readClient: GLClient | null = null;
 
-export interface MarketChainState {
-  contractMarketId: string;
-  resolvesAtPassed: boolean;
-  status: string;
-  raw?: unknown;
-}
-
-interface RpcCallOptions {
-  method: string;
-  params: Record<string, unknown>;
-  /** payable value in GEN base units, as a decimal string, if this call transfers value */
-  value?: string;
-}
-
-/**
- * Low-level JSON-RPC call against GenLayer StudioNet.
- * TODO(contract-wiring): replace with genlayer-js SDK call once available/finalized.
- */
-async function rpcCall(opts: RpcCallOptions): Promise<unknown> {
-  if (!env.CONTRACT_ADDRESS) {
-    throw new GenLayerNotConfiguredError();
-  }
-
-  const body = {
-    jsonrpc: "2.0",
-    id: crypto.randomUUID(),
-    method: "gen_call", // TODO(contract-wiring): confirm actual StudioNet method name
-    params: [
-      {
-        contract_address: env.CONTRACT_ADDRESS,
-        method: opts.method,
-        args: opts.params,
-        value: opts.value ?? "0",
-      },
-    ],
-  };
-
-  const res = await fetch(env.GENLAYER_RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+function getReadClient(): GLClient {
+  if (!env.CONTRACT_ADDRESS) throw new GenLayerNotConfiguredError();
+  if (readClient) return readClient;
+  readClient = createClient({
+    chain: chains.studionet,
+    endpoint: env.GENLAYER_RPC_URL,
   });
-
-  if (!res.ok) {
-    throw new Error(`GenLayer RPC call failed: HTTP ${res.status}`);
-  }
-
-  const json = (await res.json()) as { result?: unknown; error?: { message: string } };
-  if (json.error) {
-    throw new Error(`GenLayer RPC error: ${json.error.message}`);
-  }
-  return json.result;
+  return readClient;
 }
 
-/** Poll a transaction hash until it reaches a terminal state or times out. */
-export async function pollReceipt(
-  txHash: string,
-  opts: { timeoutMs?: number; intervalMs?: number } = {}
-): Promise<TxReceipt> {
-  const timeoutMs = opts.timeoutMs ?? 60_000;
-  const intervalMs = opts.intervalMs ?? 2_000;
-  const deadline = Date.now() + timeoutMs;
+/** Keeper client: only constructed if GENLAYER_KEEPER_PRIVATE_KEY is set. See trust model above. */
+let keeperClient: GLClient | null = null;
 
-  while (Date.now() < deadline) {
-    const result = (await rpcCall({
-      method: "__internal_get_receipt", // TODO(contract-wiring): confirm real receipt RPC method
-      params: { tx_hash: txHash },
-    })) as { status?: string; block_number?: number } | null;
+export function getKeeperClient(): GLClient | null {
+  if (!env.GENLAYER_KEEPER_PRIVATE_KEY || !env.CONTRACT_ADDRESS) return null;
+  if (keeperClient) return keeperClient;
+  const account = createAccount(env.GENLAYER_KEEPER_PRIVATE_KEY as `0x${string}`);
+  keeperClient = createClient({
+    chain: chains.studionet,
+    endpoint: env.GENLAYER_RPC_URL,
+    account,
+  });
+  return keeperClient;
+}
 
-    if (result?.status === "success" || result?.status === "failed") {
-      return {
-        txHash,
-        status: result.status,
-        blockNumber: result.block_number,
-        raw: result,
-      };
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
+export interface ChainMarket {
+  id: number;
+  creator: string;
+  question: string;
+  category: string;
+  horizonYears: number;
+  resolutionCriteria: string;
+  allowedEvidenceTypes: string;
+  createdAt: number;
+  resolvesAt: number;
+  status: string;
+  poolDeposited: string;
+  totalYes: string;
+  totalNo: string;
+  adjudicationRequestedAt: number;
+  verdict: string;
+  evidenceCount: number;
+}
 
-  logger.warn({ txHash }, "GenLayer receipt poll timed out; leaving as pending");
-  return { txHash, status: "pending" };
+function mapMarket(raw: Record<string, unknown>): ChainMarket {
+  return {
+    id: Number(raw.id),
+    creator: String(raw.creator),
+    question: String(raw.question),
+    category: String(raw.category),
+    horizonYears: Number(raw.horizon_years),
+    resolutionCriteria: String(raw.resolution_criteria),
+    allowedEvidenceTypes: String(raw.allowed_evidence_types),
+    createdAt: Number(raw.created_at),
+    resolvesAt: Number(raw.resolves_at),
+    status: String(raw.status),
+    poolDeposited: String(raw.pool_deposited),
+    totalYes: String(raw.total_yes),
+    totalNo: String(raw.total_no),
+    adjudicationRequestedAt: Number(raw.adjudication_requested_at),
+    verdict: String(raw.verdict ?? ""),
+    evidenceCount: Number(raw.evidence_count),
+  };
 }
 
 export const genlayerClient = {
@@ -129,131 +106,112 @@ export const genlayerClient = {
     return Boolean(env.CONTRACT_ADDRESS);
   },
 
-  async createMarket(params: {
-    question: string;
-    category: string;
-    horizonYears: number;
-    resolutionCriteria: string;
-    resolvesAt: string;
-    initialLiquidityGen: string;
-  }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "create_market",
-      params: {
-        question: params.question,
-        category: params.category,
-        horizon_years: params.horizonYears,
-        resolution_criteria: params.resolutionCriteria,
-        resolves_at: params.resolvesAt,
-      },
-      value: params.initialLiquidityGen,
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async stake(params: {
-    contractMarketId: string;
-    side: "yes" | "no";
-    amountGen: string;
-    wallet: string;
-  }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "stake",
-      params: { market_id: params.contractMarketId, side: params.side, wallet: params.wallet },
-      value: params.amountGen,
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async submitEvidencePointer(params: {
-    contractMarketId: string;
-    url: string;
-    sourceType: string;
-    wallet: string;
-  }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "submit_evidence_pointer",
-      params: {
-        market_id: params.contractMarketId,
-        url: params.url,
-        source_type: params.sourceType,
-        wallet: params.wallet,
-      },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async requestAdjudication(params: { contractMarketId: string }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "request_adjudication",
-      params: { market_id: params.contractMarketId },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async settle(params: { contractMarketId: string }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "settle",
-      params: { market_id: params.contractMarketId },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async claimPayout(params: { contractMarketId: string; wallet: string }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "claim_payout",
-      params: { market_id: params.contractMarketId, wallet: params.wallet },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async claimTimeoutRefund(params: {
-    contractMarketId: string;
-    wallet: string;
-  }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "claim_timeout_refund",
-      params: { market_id: params.contractMarketId, wallet: params.wallet },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
-  async cancelMarket(params: { contractMarketId: string }): Promise<{ txHash: string }> {
-    const result = (await rpcCall({
-      method: "cancel_market",
-      params: { market_id: params.contractMarketId },
-    })) as { tx_hash: string };
-    return { txHash: result.tx_hash };
-  },
-
   /**
-   * Read-only on-chain deadline check. Used by the deadline enforcer job so it never
-   * trusts wall-clock alone — the contract is the source of truth for whether
-   * resolves_at has actually passed from its own perspective.
-   *
-   * TODO(contract-wiring): contracts/echo_markets.py exposes `get_market(market_id) -> dict`
-   * (line ~1048), not a dedicated `get_market_state`/`resolves_at_passed` read method.
-   * Once the ABI/dict shape is finalized, call `get_market` here and derive
-   * `resolvesAtPassed` client-side via the contract's own `pure_is_deadline_passed`
-   * semantics (now_ts vs resolves_at from the returned dict) rather than trusting a
-   * field that may not exist. Left as `get_market_state` for now so this wrapper has
-   * a stable call site to swap in one place.
+   * Read-only: fetches the market straight from the contract's own
+   * `get_market(market_id) -> dict` view method. This is the ONLY source of
+   * truth for whether a deadline has actually passed on-chain — the
+   * deadline enforcer job derives `resolvesAtPassed` client-side from
+   * `resolvesAt` here rather than trusting any separately-cached field.
    */
-  async getMarketChainState(contractMarketId: string): Promise<MarketChainState> {
-    const result = (await rpcCall({
-      method: "get_market_state", // TODO(contract-wiring): swap to "get_market" per echo_markets.py
-      params: { market_id: contractMarketId },
-    })) as { resolves_at_passed?: boolean; status?: string };
+  async getMarket(contractMarketId: number): Promise<ChainMarket> {
+    const client = getReadClient();
+    const result = (await client.readContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "get_market",
+      args: [contractMarketId],
+    })) as Record<string, unknown>;
+    return mapMarket(result);
+  },
 
+  async getMarketCount(): Promise<number> {
+    const client = getReadClient();
+    const result = await client.readContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "get_market_count",
+      args: [],
+    });
+    return Number(result);
+  },
+
+  async getStake(contractMarketId: number, wallet: string): Promise<{ yes: string; no: string; claimed: boolean }> {
+    const client = getReadClient();
+    const result = (await client.readContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "get_stake",
+      args: [contractMarketId, wallet],
+    })) as Record<string, unknown>;
     return {
-      contractMarketId,
-      resolvesAtPassed: Boolean(result?.resolves_at_passed),
-      status: result?.status ?? "unknown",
-      raw: result,
+      yes: String(result.yes ?? "0"),
+      no: String(result.no ?? "0"),
+      claimed: Boolean(result.claimed),
     };
   },
 
-  pollReceipt,
+  async getAllEvidence(
+    contractMarketId: number
+  ): Promise<Array<{ url: string; sourceType: string; submitter: string }>> {
+    const client = getReadClient();
+    const result = (await client.readContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "get_all_evidence",
+      args: [contractMarketId],
+    })) as Array<Record<string, unknown>>;
+    return result.map((e) => ({
+      url: String(e.url ?? ""),
+      sourceType: String(e.source_type ?? ""),
+      submitter: String(e.submitter ?? ""),
+    }));
+  },
+
+  /**
+   * Keeper-only: advances a market past its deadline. Non-payable,
+   * permissionless on-chain (the contract itself re-checks now >= resolves_at
+   * and reverts if called early — this call is never trusted to be correct,
+   * only convenient). No-ops with a warning if no keeper key is configured.
+   */
+  async requestAdjudication(contractMarketId: number): Promise<{ txHash: string } | null> {
+    const client = getKeeperClient();
+    if (!client) {
+      logger.warn("GENLAYER_KEEPER_PRIVATE_KEY not set; skipping automated request_adjudication");
+      return null;
+    }
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "request_adjudication",
+      args: [contractMarketId],
+      value: 0n,
+    });
+    return { txHash: hash as unknown as string };
+  },
+
+  /**
+   * Keeper-only: triggers settle() once a market is awaiting_adjudication.
+   * Non-payable; the contract's own nondet consensus determines the
+   * verdict, this call just initiates it. See trust model at top of file.
+   */
+  async settle(contractMarketId: number): Promise<{ txHash: string } | null> {
+    const client = getKeeperClient();
+    if (!client) {
+      logger.warn("GENLAYER_KEEPER_PRIVATE_KEY not set; skipping automated settle");
+      return null;
+    }
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "settle",
+      args: [contractMarketId],
+      value: 0n,
+    });
+    return { txHash: hash as unknown as string };
+  },
+
+  async waitForReceipt(txHash: string) {
+    const client = getReadClient();
+    return client.waitForTransactionReceipt({
+      hash: txHash as Hash,
+      retries: 20,
+      interval: 3000,
+    });
+  },
 };
 
-export type GenLayerClient = typeof genlayerClient;
+export type GenLayerClientWrapper = typeof genlayerClient;

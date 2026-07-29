@@ -25,11 +25,13 @@
     "ethers": "^6.13.2",
     "fastify": "^4.28.1",
     "fastify-plugin": "^4.5.1",
+    "genlayer-js": "^1.1.8",
     "ioredis": "^5.11.1",
     "pg": "^8.12.0",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
     "siwe": "^2.3.2",
+    "viem": "^2.55.10",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -33,11 +33,22 @@ export async function runDeadlineEnforcerOnce(): Promise<{ checked: number; enfo
     }
 
     try {
-      const chainState = await genlayerClient.getMarketChainState(market.contract_market_id);
+      const chainMarket = await genlayerClient.getMarket(Number(market.contract_market_id));
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const resolvesAtPassed = nowSeconds >= chainMarket.resolvesAt;
 
-      if (!chainState.resolvesAtPassed) {
-        // Wall clock says it's past due, but the contract disagrees (e.g. clock skew,
-        // or the contract simply hasn't observed it yet). Do not flip — trust the chain.
+      if (chainMarket.status !== "active") {
+        // Already advanced on-chain by someone else's wallet or a prior keeper
+        // run; nothing for this pass to do (the chain indexer will pick up
+        // the resulting status change).
+        continue;
+      }
+
+      if (!resolvesAtPassed) {
+        // Wall clock says it's past due, but the contract's own resolves_at
+        // (and therefore its own nondet-cross-validated notion of "now" when
+        // request_adjudication is actually called) disagrees. Do not flip —
+        // trust the chain, not local wall clock, per PLANNING.md.
         logger.info(
           { marketId: market.id },
           "Wall clock past resolves_at but chain has not confirmed deadline; deferring"

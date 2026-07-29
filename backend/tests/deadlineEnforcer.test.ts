@@ -12,18 +12,40 @@ vi.mock("../src/genlayer/client.js", async () => {
     genlayerClient: {
       ...actual.genlayerClient,
       isConfigured: () => true,
-      getMarketChainState: vi.fn(),
+      getMarket: vi.fn(),
     },
   };
 });
 
 import { applyMigrations, createTestPool, resetDatabase, seedTestUser } from "./helpers/db.js";
 import { genlayerClient } from "../src/genlayer/client.js";
-import { insertMarket, setMarketContractId, setMarketStatus, getMarketById } from "../src/db/repositories.js";
+import { insertMarket, setMarketStatus, getMarketById } from "../src/db/repositories.js";
 import { runDeadlineEnforcerOnce } from "../src/jobs/deadlineEnforcer.js";
 
 let pool: Pool;
 const WALLET = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+function baseChainMarket(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 1,
+    creator: WALLET,
+    question: "q",
+    category: "test",
+    horizonYears: 1,
+    resolutionCriteria: "criteria",
+    allowedEvidenceTypes: "news",
+    createdAt: Math.floor(Date.now() / 1000) - 1000,
+    resolvesAt: Math.floor(Date.now() / 1000) - 60,
+    status: "active",
+    poolDeposited: "1000000000000000000",
+    totalYes: "0",
+    totalNo: "0",
+    adjudicationRequestedAt: 0,
+    verdict: "",
+    evidenceCount: 0,
+    ...overrides,
+  };
+}
 
 describe("deadline enforcer — fail-closed transitions", () => {
   beforeAll(async () => {
@@ -49,9 +71,9 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // future
+      contractMarketId: "1",
     });
     await setMarketStatus(market.id, "open");
-    await setMarketContractId(market.id, "chain-market-1");
 
     const result = await runDeadlineEnforcerOnce();
     expect(result.checked).toBe(0);
@@ -61,23 +83,21 @@ describe("deadline enforcer — fail-closed transitions", () => {
     expect(refreshed?.deadline_enforced_at).toBeNull();
   });
 
-  it("does NOT flip status when wall clock has passed but on-chain check says it hasn't (never trust wall-clock alone)", async () => {
+  it("does NOT flip status when wall clock has passed but the contract's own resolves_at says it hasn't (never trust wall-clock alone)", async () => {
     const market = await insertMarket({
       question: "Will Y happen?",
       category: "test",
       horizonYears: 1,
       resolutionCriteria: "criteria",
       createdBy: WALLET,
-      resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(), // already past
+      resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(), // already past by wall clock
+      contractMarketId: "2",
     });
     await setMarketStatus(market.id, "open");
-    await setMarketContractId(market.id, "chain-market-2");
 
-    vi.mocked(genlayerClient.getMarketChainState).mockResolvedValue({
-      contractMarketId: "chain-market-2",
-      resolvesAtPassed: false, // chain disagrees with wall clock
-      status: "open",
-    });
+    vi.mocked(genlayerClient.getMarket).mockResolvedValue(
+      baseChainMarket({ id: 2, status: "active", resolvesAt: Math.floor(Date.now() / 1000) + 3600 })
+    );
 
     const result = await runDeadlineEnforcerOnce();
     expect(result.checked).toBe(1);
@@ -88,7 +108,7 @@ describe("deadline enforcer — fail-closed transitions", () => {
     expect(refreshed?.deadline_enforced_at).toBeNull();
   });
 
-  it("flips to awaiting_adjudication only when BOTH wall clock and chain confirm the deadline", async () => {
+  it("flips to awaiting_adjudication only when BOTH wall clock and the contract confirm the deadline", async () => {
     const market = await insertMarket({
       question: "Will Z happen?",
       category: "test",
@@ -96,15 +116,13 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      contractMarketId: "3",
     });
     await setMarketStatus(market.id, "open");
-    await setMarketContractId(market.id, "chain-market-3");
 
-    vi.mocked(genlayerClient.getMarketChainState).mockResolvedValue({
-      contractMarketId: "chain-market-3",
-      resolvesAtPassed: true,
-      status: "resolved",
-    });
+    vi.mocked(genlayerClient.getMarket).mockResolvedValue(
+      baseChainMarket({ id: 3, status: "active", resolvesAt: Math.floor(Date.now() / 1000) - 60 })
+    );
 
     const result = await runDeadlineEnforcerOnce();
     expect(result.enforced).toBe(1);
@@ -114,7 +132,7 @@ describe("deadline enforcer — fail-closed transitions", () => {
     expect(refreshed?.deadline_enforced_at).not.toBeNull();
   });
 
-  it("skips markets without a confirmed contract_market_id (nothing to check on-chain yet)", async () => {
+  it("skips a market the chain already advanced past 'active' (someone else's wallet got there first — never double-enforce)", async () => {
     const market = await insertMarket({
       question: "Will W happen?",
       category: "test",
@@ -122,12 +140,20 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      contractMarketId: "4",
     });
     await setMarketStatus(market.id, "open");
-    // no contract_market_id set — still pending_chain in practice
+
+    vi.mocked(genlayerClient.getMarket).mockResolvedValue(
+      baseChainMarket({ id: 4, status: "awaiting_adjudication" })
+    );
 
     const result = await runDeadlineEnforcerOnce();
     expect(result.enforced).toBe(0);
-    expect(genlayerClient.getMarketChainState).not.toHaveBeenCalled();
+
+    const refreshed = await getMarketById(market.id);
+    // Still "open" in Postgres at this instant — the chain indexer (not the
+    // deadline enforcer) is responsible for pulling this transition in.
+    expect(refreshed?.status).toBe("open");
   });
 });

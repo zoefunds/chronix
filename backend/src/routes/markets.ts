@@ -6,7 +6,6 @@ import {
   submitEvidenceSchema,
 } from "../schemas/index.js";
 import {
-  enqueueChainSync,
   getMarketById,
   insertEvidence,
   insertMarket,
@@ -39,10 +38,15 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     return reply.send(result);
   });
 
-  // POST /markets — record creation intent; never "confirmed" until chain receipt confirms.
+  // POST /markets — records a market AFTER the user's own wallet has already
+  // signed and submitted create_market directly to GenLayer. This backend
+  // never holds a key capable of moving a user's GEN, so it cannot submit
+  // that write itself — see genlayer/client.ts's trust-model docstring. The
+  // chain indexer job independently re-reads get_market() on a schedule, so
+  // even if this call is skipped or lies about details, chain truth wins.
   fastify.post(
     "/markets",
-    { preHandler: [fastify.authenticate], config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
+    { preHandler: [fastify.authenticate], config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const body = createMarketSchema.parse(request.body);
       const wallet = request.walletAddress!;
@@ -55,26 +59,16 @@ export async function marketsRoutes(fastify: FastifyInstance) {
           resolutionCriteria: body.resolutionCriteria,
           createdBy: wallet,
           resolvesAt: body.resolvesAt,
+          contractMarketId: body.contractMarketId,
         });
 
         await insertMarketEvent(
-          { marketId: inserted.id, type: "created", payload: { intent: "create_market" }, confirmed: false },
-          client
-        );
-
-        await enqueueChainSync(
           {
             marketId: inserted.id,
-            action: "create_market",
-            payload: {
-              question: body.question,
-              category: body.category,
-              horizonYears: body.horizonYears,
-              resolutionCriteria: body.resolutionCriteria,
-              resolvesAt: body.resolvesAt,
-              initialLiquidityGen: body.initialLiquidityGen,
-              createdBy: wallet,
-            },
+            type: "created",
+            payload: { contractMarketId: body.contractMarketId },
+            chainTxHash: body.txHash,
+            confirmed: true,
           },
           client
         );
@@ -82,10 +76,7 @@ export async function marketsRoutes(fastify: FastifyInstance) {
         return inserted;
       });
 
-      return reply.code(202).send({
-        market,
-        message: "Market creation intent recorded; awaiting chain confirmation.",
-      });
+      return reply.code(201).send({ market });
     }
   );
 
@@ -117,8 +108,11 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     return reply.send({ evidence });
   });
 
-  // POST /markets/:id/evidence — records the pointer; the contract itself fetches
-  // and validates it during adjudication (never trusts the submitted summary as fact).
+  // POST /markets/:id/evidence — records a pointer AFTER the user's own
+  // wallet already called submit_evidence_pointer directly on-chain (see
+  // POST /markets docstring for why the backend never submits this itself).
+  // The contract's own settle() nondet fetch is the only thing ever treated
+  // as authoritative for adjudication — this row is purely a UI convenience.
   fastify.post(
     "/markets/:id/evidence",
     { preHandler: [fastify.authenticate], config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
@@ -144,22 +138,8 @@ export async function marketsRoutes(fastify: FastifyInstance) {
             marketId: id,
             type: "evidence_submitted",
             payload: { evidenceId: inserted.id, url: body.url },
-            confirmed: false,
-          },
-          client
-        );
-
-        await enqueueChainSync(
-          {
-            marketId: id,
-            action: "submit_evidence_pointer",
-            payload: {
-              evidenceId: inserted.id,
-              url: body.url,
-              sourceType: body.sourceType,
-              wallet,
-              contractMarketId: market.contract_market_id,
-            },
+            chainTxHash: body.txHash,
+            confirmed: true,
           },
           client
         );
@@ -167,7 +147,7 @@ export async function marketsRoutes(fastify: FastifyInstance) {
         return inserted;
       });
 
-      return reply.code(202).send({ evidence, message: "Evidence pointer recorded; awaiting chain sync." });
+      return reply.code(201).send({ evidence });
     }
   );
 

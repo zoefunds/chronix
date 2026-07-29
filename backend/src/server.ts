@@ -3,6 +3,7 @@ import { env } from "./config.js";
 import { logger } from "./lib/logger.js";
 import { startDeadlineEnforcer } from "./jobs/deadlineEnforcer.js";
 import { startChainReconciler } from "./jobs/chainReconciler.js";
+import { startChainIndexer } from "./jobs/chainIndexer.js";
 import { pool } from "./db/pool.js";
 
 async function main() {
@@ -10,11 +11,13 @@ async function main() {
 
   const stopDeadlineEnforcer = startDeadlineEnforcer();
   const stopChainReconciler = startChainReconciler();
+  const stopChainIndexer = startChainIndexer();
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down gracefully");
     stopDeadlineEnforcer();
     stopChainReconciler();
+    stopChainIndexer();
     try {
       await app.close();
       await pool.end();

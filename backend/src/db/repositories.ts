@@ -106,10 +106,18 @@ export async function insertMarket(params: {
   resolutionCriteria: string;
   createdBy: string;
   resolvesAt: string;
+  /**
+   * The on-chain market id, already assigned by a successful create_market
+   * call the USER's own wallet submitted directly to GenLayer (never the
+   * backend). This route only ever records what already happened on-chain
+   * — see routes/markets.ts POST /markets docstring.
+   */
+  contractMarketId: string;
 }): Promise<MarketRow> {
   const res = await query<MarketRow>(
-    `INSERT INTO markets (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at)
-     VALUES ($1, $2, $3, $4, $5, 'pending_chain', $6)
+    `INSERT INTO markets
+       (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at, contract_market_id)
+     VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
      RETURNING *`,
     [
       params.question,
@@ -118,9 +126,39 @@ export async function insertMarket(params: {
       params.resolutionCriteria,
       params.createdBy,
       params.resolvesAt,
+      params.contractMarketId,
     ]
   );
   return res.rows[0];
+}
+
+/**
+ * Re-reads a market's mutable fields from the contract's own get_market()
+ * response and syncs them into Postgres. This is the reconciliation path
+ * that keeps the DB from silently diverging from chain truth (see
+ * MEMORY.md's Event-Weaver lesson) — called by the chain indexer job for
+ * every market currently open/awaiting_adjudication.
+ */
+export async function syncMarketFromChain(
+  marketId: string,
+  chain: { status: MarketStatus; verdict?: string }
+): Promise<void> {
+  await query(`UPDATE markets SET status = $2 WHERE id = $1 AND status IS DISTINCT FROM $2`, [
+    marketId,
+    chain.status,
+  ]);
+}
+
+/** Markets that have an on-chain id and are still in a mutable lifecycle state. */
+export async function findActiveChainMarkets(): Promise<MarketRow[]> {
+  const res = await query<MarketRow>(
+    `SELECT * FROM markets
+     WHERE contract_market_id IS NOT NULL
+       AND status IN ('open', 'awaiting_adjudication')
+     ORDER BY resolves_at ASC
+     LIMIT 200`
+  );
+  return res.rows;
 }
 
 export async function getMarketById(id: string): Promise<MarketRow | null> {
