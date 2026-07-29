@@ -11,8 +11,16 @@ import { fileURLToPath } from "node:url";
 import { pool } from "./pool.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// backend/src/db -> ../../../database/migrations
-const migrationsDir = path.resolve(__dirname, "../../../database/migrations");
+// Resolve both the local-dev layout (tsx runs straight from backend/src/db,
+// so repo-root/database is 3 levels up) and the production Docker layout
+// (compiled to /app/dist/db, and the Dockerfile COPYs database/ to
+// /app/database — only 2 levels up from dist/db). Try both rather than
+// hardcoding one, since this file runs unchanged in both contexts.
+const candidates = [
+  path.resolve(__dirname, "../../../database/migrations"), // local: backend/src/db -> repo root
+  path.resolve(__dirname, "../../database/migrations"), // prod: /app/dist/db -> /app
+];
+const migrationsDir = candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
 
 async function ensureMigrationsTable() {
   await pool.query(`
