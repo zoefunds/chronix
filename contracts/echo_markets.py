@@ -1,4 +1,4 @@
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:test" }
 
 import json
 from dataclasses import dataclass
@@ -1030,14 +1030,18 @@ No other text, no markdown fences.
 class _GenRecipient:
     """
     Thin EVM-interface shim used only by `_send_gen` to perform the actual
-    native GEN value transfer. This is the documented GenVM fallback
-    pattern for outbound value transfer (payable "emit_transfer" call on a
-    recipient interface) referenced in the task brief, used here because a
-    more specific "native send" primitive was not confirmed in the
-    crawlable docs reached during research. All money leaves this contract
-    through exactly one call site (`EchoMarkets._send_gen`), which is what
-    makes the zero-before-transfer ordering auditable in one place.
+    native GEN value transfer. `emit_transfer` is NOT hand-declared here —
+    it is injected automatically by the `@gl.evm.contract_interface`
+    decorator for any address-shaped interface stub with empty View/Write
+    inner classes, matching the confirmed working pattern (independently
+    verified against a real deployed GenLayer contract). All money leaves
+    this contract through exactly one call site (`EchoMarkets._send_gen`),
+    which is what makes the zero-before-transfer ordering auditable in one
+    place.
     """
 
-    class transact:
-        def emit_transfer(self, value: u256) -> None: ...
+    class View:
+        pass
+
+    class Write:
+        pass
