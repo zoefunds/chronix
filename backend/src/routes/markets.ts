@@ -3,6 +3,7 @@ import {
   createMarketSchema,
   marketIdParamSchema,
   marketsQuerySchema,
+  recordStakeSchema,
   submitEvidenceSchema,
 } from "../schemas/index.js";
 import {
@@ -10,6 +11,7 @@ import {
   insertEvidence,
   insertMarket,
   insertMarketEvent,
+  insertPosition,
   listEvidenceForMarket,
   listEventsForMarket,
   listMarkets,
@@ -98,6 +100,47 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     const positions = await listPositionsForMarket(id);
     return reply.send({ positions });
   });
+
+  // POST /markets/:id/positions — records a stake AFTER the user's own
+  // wallet already called the payable `stake` method directly on GenLayer
+  // (same trust-model pattern as POST /markets — see its docstring).
+  fastify.post(
+    "/markets/:id/positions",
+    { preHandler: [fastify.authenticate], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const { id } = marketIdParamSchema.parse(request.params);
+      const body = recordStakeSchema.parse(request.body);
+      const wallet = request.walletAddress!;
+
+      const market = await getMarketById(id);
+      if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+
+      const position = await withTransaction(async (client) => {
+        const inserted = await insertPosition({
+          marketId: id,
+          walletAddress: wallet,
+          side: body.side,
+          shares: body.shares,
+          avgPrice: body.avgPrice,
+        });
+
+        await insertMarketEvent(
+          {
+            marketId: id,
+            type: "stake_recorded",
+            payload: { side: body.side, shares: body.shares },
+            chainTxHash: body.txHash,
+            confirmed: true,
+          },
+          client
+        );
+
+        return inserted;
+      });
+
+      return reply.code(201).send({ position });
+    }
+  );
 
   // GET /markets/:id/evidence
   fastify.get("/markets/:id/evidence", async (request, reply) => {

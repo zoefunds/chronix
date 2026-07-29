@@ -57,3 +57,13 @@ export const submitEvidenceSchema = z.object({
 export const walletParamSchema = z.object({
   wallet: walletAddressSchema,
 });
+
+// Same pattern as createMarketSchema/submitEvidenceSchema: the user's own
+// wallet already called the payable `stake` method directly on GenLayer.
+// This just mirrors it into Postgres for fast reads.
+export const recordStakeSchema = z.object({
+  side: z.enum(["yes", "no"]),
+  shares: z.string().regex(/^\d+(\.\d+)?$/, "Must be a decimal GEN amount"),
+  avgPrice: z.string().regex(/^\d+(\.\d+)?$/).default("1"),
+  txHash: z.string().min(1),
+});

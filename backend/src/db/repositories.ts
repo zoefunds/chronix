@@ -53,6 +53,7 @@ export type MarketEventType =
   | "created"
   | "deadline_passed"
   | "evidence_submitted"
+  | "stake_recorded"
   | "verdict_pending"
   | "verdict_settled"
   | "payout_claimed"

@@ -18,11 +18,12 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
   })
@@ -53,34 +54,92 @@ function toQuery(params: Record<string, string | undefined>): string {
 
 export const api = {
   /** GET /markets */
-  listMarkets: (filters: MarketFilters = {}) =>
-    request<Market[]>(`/markets${toQuery(filters)}`),
+  async listMarkets(filters: MarketFilters = {}) {
+    const res = await request<{ markets: Market[]; total: number }>(`/markets${toQuery(filters)}`)
+    return res.markets
+  },
 
   /** GET /markets/:id */
-  getMarket: (id: string) => request<Market>(`/markets/${id}`),
+  async getMarket(id: string) {
+    const res = await request<{ market: Market }>(`/markets/${id}`)
+    return res.market
+  },
 
-  /** POST /markets */
-  createMarket: (payload: CreateMarketPayload) =>
-    request<Market>('/markets', { method: 'POST', body: JSON.stringify(payload) }),
+  /**
+   * POST /markets — records a market AFTER the user's own wallet already
+   * signed and submitted create_market directly on GenLayer (see
+   * src/lib/genlayer.ts). onChain proof (contractMarketId + txHash) is
+   * required — this never submits the on-chain write itself.
+   */
+  async createMarket(
+    payload: CreateMarketPayload,
+    onChain: { contractMarketId: string; txHash: string; resolvesAt: string },
+    token: string,
+  ) {
+    const res = await request<{ market: Market }>(
+      '/markets',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          question: payload.question,
+          category: payload.category,
+          horizonYears: payload.horizonYears === 'permanent' ? 100 : payload.horizonYears,
+          resolutionCriteria: payload.resolutionCriteria,
+          resolvesAt: onChain.resolvesAt,
+          contractMarketId: onChain.contractMarketId,
+          txHash: onChain.txHash,
+        }),
+      },
+      token,
+    )
+    return res.market
+  },
 
   /** GET /markets/:id/positions */
-  getMarketPositions: (id: string) => request<Position[]>(`/markets/${id}/positions`),
+  async getMarketPositions(id: string) {
+    const res = await request<{ positions: Position[] }>(`/markets/${id}/positions`)
+    return res.positions
+  },
 
-  /** POST /markets/:id/positions — stake YES/NO */
-  stake: (id: string, payload: { side: 'yes' | 'no'; amount: number; wallet: string }) =>
-    request<Position>(`/markets/${id}/positions`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+  /**
+   * POST /markets/:id/positions — records a stake AFTER the user's own
+   * wallet already called the payable `stake` method directly on GenLayer.
+   */
+  async stake(
+    id: string,
+    payload: { side: 'yes' | 'no'; shares: string; avgPrice: string; txHash: string },
+    token: string,
+  ) {
+    const res = await request<{ position: Position }>(
+      `/markets/${id}/positions`,
+      { method: 'POST', body: JSON.stringify(payload) },
+      token,
+    )
+    return res.position
+  },
 
   /** GET /markets/:id/evidence */
-  getMarketEvidence: (id: string) => request<Evidence[]>(`/markets/${id}/evidence`),
+  async getMarketEvidence(id: string) {
+    const res = await request<{ evidence: Evidence[] }>(`/markets/${id}/evidence`)
+    return res.evidence
+  },
 
-  /** POST /markets/:id/evidence — submit an evidence pointer (URL only) */
-  submitEvidence: (
+  /**
+   * POST /markets/:id/evidence — records a pointer AFTER the user's own
+   * wallet already called submit_evidence_pointer directly on GenLayer.
+   */
+  async submitEvidence(
     id: string,
-    payload: { sourceType: string; url: string; summary: string; wallet: string },
-  ) => request<Evidence>(`/markets/${id}/evidence`, { method: 'POST', body: JSON.stringify(payload) }),
+    payload: { sourceType: string; url: string; summary: string; txHash: string },
+    token: string,
+  ) {
+    const res = await request<{ evidence: Evidence }>(
+      `/markets/${id}/evidence`,
+      { method: 'POST', body: JSON.stringify(payload) },
+      token,
+    )
+    return res.evidence
+  },
 
   /** GET /markets/:id/adjudicate — read-only adjudication status/result */
   getAdjudication: (id: string) => request<AdjudicationResult>(`/markets/${id}/adjudicate`),

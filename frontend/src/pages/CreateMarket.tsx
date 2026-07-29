@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Label } from '../components/ui'
 import { useAuth } from '../lib/auth'
+import { api } from '../lib/api'
+import { genlayer } from '../lib/genlayer'
+import type { Address } from 'genlayer-js/types'
 import type { CreateMarketPayload, EvidenceSourceType, Horizon, MarketCategory } from '../types'
 
 const categories: MarketCategory[] = ['politics', 'technology', 'culture', 'science', 'economics', 'geopolitics', 'sports', 'other']
@@ -10,7 +13,7 @@ const evidenceSourceOptions: EvidenceSourceType[] = ['news', 'academic', 'govern
 
 export default function CreateMarket() {
   const navigate = useNavigate()
-  const { wallet } = useAuth()
+  const { wallet, token } = useAuth()
   const [form, setForm] = useState<CreateMarketPayload>({
     question: '',
     category: 'technology',
@@ -21,6 +24,8 @@ export default function CreateMarket() {
   })
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [step, setStep] = useState<'idle' | 'signing' | 'recording'>('idle')
 
   function toggleSource(s: EvidenceSourceType) {
     setForm((f) => ({
@@ -33,15 +38,54 @@ export default function CreateMarket() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (!wallet || !token) {
+      setError('Connect and sign in with your wallet first.')
+      return
+    }
+    setError(null)
     setSubmitting(true)
     try {
-      // Structured for a real POST /markets call (see src/lib/api.ts createMarket).
-      // The backend isn't live yet, so we simulate success and route to Discover.
-      await new Promise((r) => setTimeout(r, 600))
+      // Step 1: the user's OWN wallet signs and submits create_market
+      // directly to GenLayer — the backend never holds a key that could do
+      // this on their behalf (see backend/src/genlayer/client.ts).
+      setStep('signing')
+      const resolvesAt = new Date(
+        Date.now() +
+          (form.horizonYears === 'permanent' ? 100 : form.horizonYears) * 365 * 24 * 60 * 60 * 1000
+      ).toISOString()
+
+      const { txHash, contractMarketId } = await genlayer.createMarket(wallet as Address, {
+        question: form.question,
+        category: form.category,
+        horizonYears: form.horizonYears === 'permanent' ? 0 : form.horizonYears,
+        resolutionCriteria: form.resolutionCriteria,
+        allowedEvidenceTypes: form.allowedEvidenceSources.join(','),
+        initialLiquidityGen: String(form.initialLiquidity),
+      })
+
+      // Step 2: mirror the now-confirmed on-chain market into Postgres so
+      // it shows up in fast reads (Discover, search) without polling chain.
+      setStep('recording')
+      await api.createMarket(
+        {
+          question: form.question,
+          category: form.category,
+          horizonYears: form.horizonYears,
+          resolutionCriteria: form.resolutionCriteria,
+          allowedEvidenceSources: form.allowedEvidenceSources,
+          initialLiquidity: form.initialLiquidity,
+        },
+        { contractMarketId: String(contractMarketId), txHash, resolvesAt },
+        token
+      )
+
       setSubmitted(true)
       setTimeout(() => navigate('/discover'), 900)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create market.')
     } finally {
       setSubmitting(false)
+      setStep('idle')
     }
   }
 
@@ -151,9 +195,16 @@ export default function CreateMarket() {
             You'll need to connect and sign in with your wallet before this can be submitted on-chain.
           </p>
         )}
+        {error && <p className="text-label-sm font-label text-error">{error}</p>}
 
         <Button type="submit" variant="secondary" disabled={submitting || submitted}>
-          {submitted ? 'Market created ✓' : submitting ? 'Submitting…' : 'Create Market'}
+          {submitted
+            ? 'Market created ✓'
+            : step === 'signing'
+              ? 'Confirm in wallet…'
+              : step === 'recording'
+                ? 'Recording…'
+                : 'Create Market'}
         </Button>
       </form>
     </div>

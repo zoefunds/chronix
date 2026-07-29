@@ -96,11 +96,21 @@ deployment state, gotchas, and open TODOs for the Chronix project.
       the `get_market_state` -> `get_market` drift, and corrected the backend/frontend trust
       model (see note above). Added `chainIndexer.ts` job. All 17 backend integration tests
       pass against a fresh Postgres.
-- [ ] Wire the frontend to sign money-moving calls directly via `genlayer-js` + the user's
-      connected wallet (create_market, stake, submit_evidence_pointer, claim_payout,
-      claim_timeout_refund, cancel_market), then POST the resulting `contractMarketId`/`txHash`
-      to the backend to mirror it. Currently the frontend still has mock versions of these
-      flows from the initial scaffold.
+- [~] Frontend GenLayer wallet wiring — PARTIAL, be precise about this with the user:
+      - [x] `frontend/src/lib/genlayer.ts` built: browser-side genlayer-js client bound to
+        the connected wallet's EIP-1193 provider (`chains.studionet`), covering
+        createMarket/stake/submitEvidencePointer/claimPayout/claimTimeoutRefund/cancelMarket.
+      - [x] `frontend/src/lib/api.ts` updated to match the backend's real response envelopes
+        (`{market}`, `{markets,total}`, `{positions}`, `{evidence}`) and the new
+        contractMarketId+txHash "record what already happened on-chain" contract.
+      - [x] `CreateMarket.tsx` fully wired end-to-end as the reference implementation: user's
+        wallet signs create_market -> waits for receipt -> reads market id -> POSTs to backend.
+      - [ ] NOT yet wired: `MarketDetail.tsx`'s Stake YES/NO buttons, evidence submission,
+        claim payout / claim timeout refund / cancel market buttons, and the Discover /
+        Portfolio / EvidenceLedger / AdjudicationResult pages still render `mockData.ts`
+        instead of calling the (now-correct) `api.ts`. The pattern to follow for each is
+        exactly what `CreateMarket.tsx` now does — sign via `genlayer.ts`, wait for receipt,
+        then POST the proof to the matching backend endpoint.
 - [ ] Provision production Postgres and set `DATABASE_URL` for the Fly deploy.
 - [ ] Run `fly deploy` from `backend/`.
 - [ ] Run `vercel --prod` from `frontend/` (target project name: `chronix` or `chronix-app`,
