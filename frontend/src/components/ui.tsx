@@ -41,29 +41,36 @@ export function Label({ children, className = '' }: { children: ReactNode; class
 }
 
 const statusStyles: Record<MarketStatus, string> = {
+  pending_chain: 'text-on-surface-variant border-outline-variant bg-surface-variant',
   open: 'text-secondary border-secondary/20 bg-secondary/10',
   awaiting_adjudication: 'text-pending-amber border-pending-amber/20 bg-pending-amber/10',
-  verdict_pending: 'text-pending-amber border-pending-amber/20 bg-pending-amber/10',
-  resolved: 'text-resolved-emerald border-resolved-emerald/20 bg-resolved-emerald/10',
-  undetermined: 'text-on-surface-variant border-outline-variant bg-surface-variant',
+  settled: 'text-resolved-emerald border-resolved-emerald/20 bg-resolved-emerald/10',
   cancelled: 'text-error border-error/20 bg-error/10',
+  failed: 'text-error border-error/20 bg-error/10',
 }
 
 const statusLabels: Record<MarketStatus, string> = {
+  pending_chain: 'PENDING',
   open: 'OPEN',
   awaiting_adjudication: 'AWAITING ADJUDICATION',
-  verdict_pending: 'VERDICT PENDING',
-  resolved: 'RESOLVED',
-  undetermined: 'UNDETERMINED',
+  settled: 'SETTLED',
   cancelled: 'CANCELLED',
+  failed: 'FAILED',
 }
 
-export function StatusChip({ status }: { status: MarketStatus }) {
+// Accepts a bare string (not just the real MarketStatus) so mock-data pages
+// with their own richer status vocabulary (e.g. 'resolved', 'undetermined')
+// can still render a sensible chip — falls back to a neutral style for
+// anything unrecognized rather than throwing.
+export function StatusChip({ status }: { status: MarketStatus | string }) {
+  const known = status in statusStyles
   return (
     <span
-      className={`font-label text-label-sm uppercase tracking-widest px-2 py-0.5 border rounded-sm ${statusStyles[status]}`}
+      className={`font-label text-label-sm uppercase tracking-widest px-2 py-0.5 border rounded-sm ${
+        known ? statusStyles[status as MarketStatus] : 'text-on-surface-variant border-outline-variant bg-surface-variant'
+      }`}
     >
-      {statusLabels[status]}
+      {known ? statusLabels[status as MarketStatus] : status.replace(/_/g, ' ').toUpperCase()}
     </span>
   )
 }

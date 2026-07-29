@@ -1,8 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Button, Card, EvidenceChip, HorizonBadge, Label, StatusChip } from '../components/ui'
-import { mockEvidence, mockMarkets } from '../lib/mockData'
+import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
+import { genlayer } from '../lib/genlayer'
+import { formatGen, weiToGen } from '../lib/format'
+import type { Address } from 'genlayer-js/types'
+import type { Evidence, Market } from '../types'
 
 const stepperStages = [
   { key: 'created', label: 'Event Occurred' },
@@ -14,13 +18,13 @@ const stepperStages = [
 function currentStageIndex(status: string) {
   switch (status) {
     case 'open':
+    case 'pending_chain':
       return 0
     case 'awaiting_adjudication':
-      return 1
-    case 'verdict_pending':
       return 2
-    case 'resolved':
-    case 'undetermined':
+    case 'settled':
+    case 'cancelled':
+    case 'failed':
       return 3
     default:
       return 0
@@ -30,18 +34,47 @@ function currentStageIndex(status: string) {
 export default function MarketDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { wallet } = useAuth()
-  const market = mockMarkets.find((m) => m.id === id)
-  const evidence = mockEvidence.filter((e) => e.marketId === id)
+  const { wallet, token } = useAuth()
+
+  const [market, setMarket] = useState<Market | null>(null)
+  const [evidence, setEvidence] = useState<Evidence[]>([])
+  const [loading, setLoading] = useState(true)
+  const [notFound, setNotFound] = useState(false)
   const [side, setSide] = useState<'yes' | 'no'>('yes')
   const [amount, setAmount] = useState('100')
+  const [staking, setStaking] = useState(false)
+  const [stakeError, setStakeError] = useState<string | null>(null)
+  const [stakeStep, setStakeStep] = useState<'idle' | 'signing' | 'recording'>('idle')
 
-  const yesPct = market ? Math.round((market.yesPool / (market.yesPool + market.noPool)) * 100) : 50
+  useEffect(() => {
+    if (!id) return
+    let cancelled = false
+    setLoading(true)
+    setNotFound(false)
+    Promise.all([api.getMarket(id), api.getMarketEvidence(id)])
+      .then(([m, e]) => {
+        if (cancelled) return
+        setMarket(m)
+        setEvidence(e)
+      })
+      .catch(() => {
+        if (!cancelled) setNotFound(true)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [id])
+
+  const yesGen = market ? weiToGen(market.total_yes_wei) : 0
+  const noGen = market ? weiToGen(market.total_no_wei) : 0
+  const totalPool = yesGen + noGen
+  const yesPct = totalPool > 0 ? Math.round((yesGen / totalPool) * 100) : 50
   const stageIndex = market ? currentStageIndex(market.status) : 0
 
   const sentimentPoints = useMemo(() => {
-    // Deterministic mock sentiment series derived from the market id so
-    // the chart is stable across renders without a backend.
     const seed = (market?.id ?? '').split('').reduce((a, c) => a + c.charCodeAt(0), 0)
     return Array.from({ length: 24 }, (_, i) => {
       const wobble = Math.sin((seed + i) / 3) * 8
@@ -49,7 +82,43 @@ export default function MarketDetail() {
     })
   }, [market?.id, yesPct])
 
-  if (!market) {
+  async function handleStake() {
+    if (!market) return
+    if (!wallet || !token) {
+      setStakeError('Connect and sign in with your wallet first.')
+      return
+    }
+    if (!market.contract_market_id) {
+      setStakeError('This market has no on-chain id yet.')
+      return
+    }
+    setStakeError(null)
+    setStaking(true)
+    try {
+      setStakeStep('signing')
+      const txHash = await genlayer.stake(
+        wallet as Address,
+        Number(market.contract_market_id),
+        side.toUpperCase() as 'YES' | 'NO',
+        amount
+      )
+      setStakeStep('recording')
+      await api.stake(market.id, { side, shares: amount, avgPrice: '1', txHash }, token)
+      const refreshed = await api.getMarket(market.id)
+      setMarket(refreshed)
+    } catch (err) {
+      setStakeError(err instanceof Error ? err.message : 'Stake failed.')
+    } finally {
+      setStaking(false)
+      setStakeStep('idle')
+    }
+  }
+
+  if (loading) {
+    return <div className="text-center py-24 text-body-sm text-on-surface-variant">Loading market…</div>
+  }
+
+  if (notFound || !market) {
     return (
       <div className="text-center py-24">
         <p className="text-body-md text-on-surface-variant mb-4">Market not found.</p>
@@ -63,6 +132,8 @@ export default function MarketDetail() {
   const path = sentimentPoints
     .map((p, i) => `${(i / (sentimentPoints.length - 1)) * 100},${100 - p}`)
     .join(' ')
+
+  const horizonYears = Number(market.horizon_years)
 
   return (
     <div className="flex flex-col gap-6">
@@ -83,16 +154,16 @@ export default function MarketDetail() {
             </div>
             <h1 className="font-headline text-headline-lg text-primary leading-snug">{market.question}</h1>
             <div className="flex items-center gap-2">
-              <HorizonBadge horizon={market.horizonYears} />
+              <HorizonBadge horizon={horizonYears >= 100 ? 'permanent' : (horizonYears as 3 | 5 | 10)} />
               <span className="font-label text-label-sm text-on-surface-variant">
-                Resolves {new Date(market.resolvesAt).toLocaleDateString()}
+                Resolves {new Date(market.resolves_at).toLocaleDateString()}
               </span>
             </div>
           </Card>
 
           <Card className="p-4">
             <div className="flex justify-between items-end mb-2">
-              <Label>Sentiment (YES probability, 24h)</Label>
+              <Label>Sentiment (YES probability)</Label>
               <span className="font-label text-label-md text-secondary">{yesPct}%</span>
             </div>
             <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-32">
@@ -108,7 +179,7 @@ export default function MarketDetail() {
 
           <Card className="p-4">
             <Label className="block mb-3">Resolution criteria</Label>
-            <p className="text-body-sm text-on-surface-variant leading-relaxed">{market.resolutionCriteria}</p>
+            <p className="text-body-sm text-on-surface-variant leading-relaxed">{market.resolution_criteria}</p>
           </Card>
 
           <Card className="p-4">
@@ -122,7 +193,7 @@ export default function MarketDetail() {
               )}
               {evidence.map((e) => (
                 <div key={e.id} className="flex gap-3 p-3 bg-surface-container-low border-l-4 border-secondary rounded-sm">
-                  <EvidenceChip>{e.sourceType}</EvidenceChip>
+                  <EvidenceChip>{e.source_type}</EvidenceChip>
                   <div className="flex-1">
                     <p className="text-body-sm text-on-surface">{e.summary}</p>
                     <a href={e.url} target="_blank" rel="noreferrer" className="font-label text-label-sm text-secondary hover:underline">
@@ -130,7 +201,7 @@ export default function MarketDetail() {
                     </a>
                   </div>
                   <span className="font-label text-label-sm text-on-surface-variant whitespace-nowrap">
-                    {new Date(e.createdAt).toLocaleDateString()}
+                    {new Date(e.created_at).toLocaleDateString()}
                   </span>
                 </div>
               ))}
@@ -160,7 +231,7 @@ export default function MarketDetail() {
                 </div>
               ))}
             </div>
-            {market.status === 'resolved' && (
+            {market.status === 'settled' && (
               <Button variant="secondary" onClick={() => navigate(`/markets/${market.id}/result`)}>
                 View adjudication result →
               </Button>
@@ -199,15 +270,23 @@ export default function MarketDetail() {
                 className="bg-surface border border-border-slate focus:border-secondary focus:ring-0 outline-none rounded px-3 py-2 text-body-sm"
               />
             </label>
+            {stakeError && <p className="text-label-sm font-label text-error">{stakeError}</p>}
             <Button
               variant="secondary"
-              disabled={market.status !== 'open'}
-              onClick={() => alert(wallet ? `Staking ${amount} GEN on ${side.toUpperCase()} (mock)` : 'Connect and sign in with your wallet first.')}
+              disabled={market.status !== 'open' || staking}
+              onClick={handleStake}
             >
-              {market.status === 'open' ? `Stake ${side.toUpperCase()}` : 'Market closed to staking'}
+              {market.status !== 'open'
+                ? 'Market closed to staking'
+                : stakeStep === 'signing'
+                  ? 'Confirm in wallet…'
+                  : stakeStep === 'recording'
+                    ? 'Recording…'
+                    : `Stake ${side.toUpperCase()}`}
             </Button>
             <p className="text-label-sm font-label text-on-surface-variant">
-              Escrowed GEN is held on-chain until settlement. No off-chain custody.
+              Escrowed GEN is held on-chain until settlement. No off-chain custody — this transaction is signed
+              by your own wallet directly against the GenLayer contract.
             </p>
           </Card>
 
@@ -215,32 +294,29 @@ export default function MarketDetail() {
             <Label>Contract details</Label>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">Contract market ID</span>
-              <span className="font-label text-label-md text-primary">{market.contractMarketId ?? '—'}</span>
+              <span className="font-label text-label-md text-primary">{market.contract_market_id ?? '—'}</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">Created by</span>
-              <span className="font-label text-label-md text-primary">{market.createdBy}</span>
+              <span className="font-label text-label-md text-primary">
+                {market.created_by.slice(0, 6)}…{market.created_by.slice(-4)}
+              </span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">YES pool</span>
-              <span className="font-label text-label-md text-secondary">${market.yesPool.toLocaleString()}</span>
+              <span className="font-label text-label-md text-secondary">{formatGen(market.total_yes_wei)} GEN</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">NO pool</span>
-              <span className="font-label text-label-md text-pending-amber">${market.noPool.toLocaleString()}</span>
+              <span className="font-label text-label-md text-pending-amber">{formatGen(market.total_no_wei)} GEN</span>
+            </div>
+            <div className="flex justify-between text-body-sm">
+              <span className="text-on-surface-variant">Initial liquidity</span>
+              <span className="font-label text-label-md text-primary">{formatGen(market.pool_deposited_wei)} GEN</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">Participants</span>
-              <span className="font-label text-label-md text-primary">{market.participantCount}</span>
-            </div>
-          </Card>
-
-          <Card className="p-4 flex flex-col gap-2">
-            <Label>Allowed evidence sources</Label>
-            <div className="flex flex-wrap gap-1">
-              {market.allowedEvidenceSources.map((s) => (
-                <EvidenceChip key={s}>{s}</EvidenceChip>
-              ))}
+              <span className="font-label text-label-md text-primary">{market.participant_count ?? 0}</span>
             </div>
           </Card>
         </div>

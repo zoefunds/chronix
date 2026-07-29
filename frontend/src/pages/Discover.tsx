@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Card, EvidenceChip, HorizonBadge, Label, StatusChip } from '../components/ui'
-import { mockEvidence, mockMarkets } from '../lib/mockData'
-import type { MarketCategory, MarketStatus } from '../types'
+import { Button, Card, HorizonBadge, Label, StatusChip } from '../components/ui'
+import { api } from '../lib/api'
+import { formatGen, weiToGen } from '../lib/format'
+import type { Market, MarketStatus } from '../types'
 
-const categories: (MarketCategory | 'all')[] = [
+const categories = [
   'all',
   'politics',
   'technology',
@@ -13,10 +14,10 @@ const categories: (MarketCategory | 'all')[] = [
   'economics',
   'geopolitics',
   'sports',
-]
+] as const
 
-const horizons: (3 | 5 | 10 | 'permanent' | 'all')[] = ['all', 3, 5, 10, 'permanent']
-const statuses: (MarketStatus | 'all')[] = ['all', 'open', 'awaiting_adjudication', 'resolved', 'undetermined']
+const horizons: (3 | 5 | 10 | 100 | 'all')[] = ['all', 3, 5, 10, 100]
+const statuses: (MarketStatus | 'all')[] = ['all', 'open', 'awaiting_adjudication', 'settled', 'cancelled']
 
 export default function Discover() {
   const navigate = useNavigate()
@@ -25,16 +26,41 @@ export default function Discover() {
   const [status, setStatus] = useState<(typeof statuses)[number]>('all')
   const [search, setSearch] = useState('')
 
-  const filtered = useMemo(
-    () =>
-      mockMarkets.filter((m) => {
-        if (category !== 'all' && m.category !== category) return false
-        if (horizon !== 'all' && m.horizonYears !== horizon) return false
-        if (status !== 'all' && m.status !== status) return false
-        if (search && !m.question.toLowerCase().includes(search.toLowerCase())) return false
-        return true
-      }),
-    [category, horizon, status, search],
+  const [markets, setMarkets] = useState<Market[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    api
+      .listMarkets({
+        category: category === 'all' ? undefined : category,
+        status: status === 'all' ? undefined : status,
+        horizon: horizon === 'all' ? undefined : String(horizon),
+      })
+      .then((rows) => {
+        if (!cancelled) setMarkets(rows)
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load markets.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [category, horizon, status])
+
+  const filtered = markets.filter(
+    (m) => !search || m.question.toLowerCase().includes(search.toLowerCase())
+  )
+
+  const totalStakedGen = markets.reduce(
+    (sum, m) => sum + weiToGen(m.total_yes_wei) + weiToGen(m.total_no_wei) + weiToGen(m.pool_deposited_wei),
+    0
   )
 
   return (
@@ -81,7 +107,7 @@ export default function Discover() {
                     : 'border-border-slate text-on-surface-variant hover:border-secondary'
                 }`}
               >
-                {h === 'all' ? 'All' : h === 'permanent' ? '∞' : `${h}Y`}
+                {h === 'all' ? 'All' : h === 100 ? '∞' : `${h}Y`}
               </button>
             ))}
           </div>
@@ -108,13 +134,11 @@ export default function Discover() {
           <Label>Platform stats</Label>
           <div className="flex justify-between text-body-sm">
             <span className="text-on-surface-variant">Markets</span>
-            <span className="font-label text-label-md text-primary">{mockMarkets.length}</span>
+            <span className="font-label text-label-md text-primary">{markets.length}</span>
           </div>
           <div className="flex justify-between text-body-sm">
             <span className="text-on-surface-variant">Total staked</span>
-            <span className="font-label text-label-md text-primary">
-              ${mockMarkets.reduce((a, m) => a + m.totalStaked, 0).toLocaleString()}
-            </span>
+            <span className="font-label text-label-md text-primary">{totalStakedGen.toLocaleString()} GEN</span>
           </div>
         </Card>
       </aside>
@@ -127,66 +151,68 @@ export default function Discover() {
           </Button>
         </div>
 
-        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filtered.map((m) => {
-            const yesPct = Math.round((m.yesPool / (m.yesPool + m.noPool)) * 100)
-            return (
-              <Card
-                key={m.id}
-                onClick={() => navigate(`/markets/${m.id}`)}
-                className="p-4 flex flex-col gap-3 cursor-pointer hover:border-secondary transition-colors group"
-              >
-                <div className="flex items-center justify-between">
-                  <Label>{m.category}</Label>
-                  <StatusChip status={m.status} />
-                </div>
-                <p className="font-headline text-headline-md text-primary leading-snug group-hover:text-secondary transition-colors">
-                  {m.question}
-                </p>
-                <div className="flex items-center gap-2">
-                  <HorizonBadge horizon={m.horizonYears} />
-                  {m.allowedEvidenceSources.slice(0, 2).map((s) => (
-                    <EvidenceChip key={s}>{s}</EvidenceChip>
-                  ))}
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="flex justify-between text-label-sm font-label text-on-surface-variant">
-                    <span>YES {yesPct}%</span>
-                    <span>NO {100 - yesPct}%</span>
-                  </div>
-                  <div className="h-1.5 w-full bg-surface-variant rounded-full overflow-hidden flex">
-                    <div className="bg-secondary h-full" style={{ width: `${yesPct}%` }} />
-                    <div className="bg-pending-amber h-full" style={{ width: `${100 - yesPct}%` }} />
-                  </div>
-                </div>
-                <div className="flex justify-between items-center border-t border-outline-variant/30 pt-3 text-label-sm font-label text-on-surface-variant">
-                  <span>${m.totalStaked.toLocaleString()} staked</span>
-                  <span>{m.participantCount} participants</span>
-                </div>
-              </Card>
-            )
-          })}
-          {filtered.length === 0 && (
-            <div className="col-span-full text-center text-on-surface-variant text-body-sm py-12">
-              No markets match these filters.
-            </div>
-          )}
-        </div>
-
-        <div>
-          <h2 className="font-headline text-headline-md text-primary mb-3">Latest evidence</h2>
-          <Card className="divide-y divide-outline-variant/30">
-            {mockEvidence.map((e) => (
-              <div key={e.id} className="flex gap-3 p-3 hover:bg-surface-container-low transition-colors">
-                <EvidenceChip>{e.sourceType}</EvidenceChip>
-                <p className="text-body-sm text-on-surface-variant flex-1">{e.summary}</p>
-                <span className="font-label text-label-sm text-on-surface-variant whitespace-nowrap">
-                  {new Date(e.createdAt).toLocaleDateString()}
-                </span>
-              </div>
-            ))}
+        {error && (
+          <Card className="p-4 text-body-sm text-error">
+            Couldn't load markets from the backend: {error}
           </Card>
-        </div>
+        )}
+
+        {loading && !error && (
+          <div className="text-center text-on-surface-variant text-body-sm py-12">Loading live markets…</div>
+        )}
+
+        {!loading && !error && (
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {filtered.map((m) => {
+              const yesGen = weiToGen(m.total_yes_wei)
+              const noGen = weiToGen(m.total_no_wei)
+              const total = yesGen + noGen
+              const yesPct = total > 0 ? Math.round((yesGen / total) * 100) : 50
+              const stakedWei = (
+                BigInt(m.total_yes_wei || '0') +
+                BigInt(m.total_no_wei || '0') +
+                BigInt(m.pool_deposited_wei || '0')
+              ).toString()
+              return (
+                <Card
+                  key={m.id}
+                  onClick={() => navigate(`/markets/${m.id}`)}
+                  className="p-4 flex flex-col gap-3 cursor-pointer hover:border-secondary transition-colors group"
+                >
+                  <div className="flex items-center justify-between">
+                    <Label>{m.category}</Label>
+                    <StatusChip status={m.status} />
+                  </div>
+                  <p className="font-headline text-headline-md text-primary leading-snug group-hover:text-secondary transition-colors">
+                    {m.question}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <HorizonBadge horizon={Number(m.horizon_years) >= 100 ? 'permanent' : (Number(m.horizon_years) as 3 | 5 | 10)} />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex justify-between text-label-sm font-label text-on-surface-variant">
+                      <span>YES {yesPct}%</span>
+                      <span>NO {100 - yesPct}%</span>
+                    </div>
+                    <div className="h-1.5 w-full bg-surface-variant rounded-full overflow-hidden flex">
+                      <div className="bg-secondary h-full" style={{ width: `${yesPct}%` }} />
+                      <div className="bg-pending-amber h-full" style={{ width: `${100 - yesPct}%` }} />
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center border-t border-outline-variant/30 pt-3 text-label-sm font-label text-on-surface-variant">
+                    <span>{formatGen(stakedWei)} GEN staked</span>
+                    <span>{m.participant_count ?? 0} participants</span>
+                  </div>
+                </Card>
+              )
+            })}
+            {filtered.length === 0 && (
+              <div className="col-span-full text-center text-on-surface-variant text-body-sm py-12">
+                No markets match these filters yet.
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

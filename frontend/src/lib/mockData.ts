@@ -1,12 +1,91 @@
-import type { AdjudicationResult, Evidence, Market, Portfolio } from '../types'
+import type { EvidenceSourceType, MarketCategory } from '../types'
 
 /**
- * Local mock data used until the backend endpoints described in
- * PLANNING.md (`/markets`, `/portfolio/:wallet`, etc.) are live. Every
- * page reads through src/lib/api.ts, so swapping this out for real
- * fetch responses requires no component changes.
+ * Mock data for pages whose full backend support doesn't exist yet
+ * (Portfolio claimable amounts, AdjudicationResult reasoning timelines —
+ * these need real on-chain reads / GenVM trace data the backend doesn't
+ * compute today). Discover, MarketDetail, and CreateMarket are wired to
+ * live data via src/lib/api.ts + src/lib/genlayer.ts — see MEMORY.md for
+ * exactly which pages still need this wiring.
+ *
+ * Deliberately typed with LOCAL interfaces below, not the real API types
+ * in ../types, since those now mirror the backend's actual (leaner) row
+ * shapes and no longer have fields like yesPool/claimableAmount that only
+ * this mock data provides.
  */
-export const mockMarkets: Market[] = [
+
+interface MockMarket {
+  id: string
+  question: string
+  category: MarketCategory
+  horizonYears: 3 | 5 | 10 | 'permanent'
+  resolutionCriteria: string
+  createdBy: string
+  contractMarketId: string | null
+  status: 'open' | 'awaiting_adjudication' | 'verdict_pending' | 'resolved' | 'undetermined' | 'cancelled'
+  resolvesAt: string
+  createdAt: string
+  yesPool: number
+  noPool: number
+  totalStaked: number
+  participantCount: number
+  allowedEvidenceSources: EvidenceSourceType[]
+}
+
+interface MockEvidence {
+  id: string
+  marketId: string
+  sourceType: EvidenceSourceType
+  url: string
+  summary: string
+  submittedBy: string
+  weight: number
+  createdAt: string
+}
+
+interface MockAdjudicationResult {
+  marketId: string
+  verdict: 'yes' | 'no' | 'undetermined'
+  confidence: number
+  sourceWeights: { sourceType: EvidenceSourceType; weight: number; sourcesConsulted: number }[]
+  reasoningTimeline: { timestamp: string; step: string; detail: string }[]
+  evidenceArtifacts: MockEvidence[]
+  settledAt: string | null
+}
+
+interface MockPortfolioPosition {
+  id: string
+  marketId: string
+  walletAddress: string
+  side: 'yes' | 'no'
+  shares: number
+  avgPrice: number
+  txHash: string | null
+  createdAt: string
+  marketQuestion: string
+  marketStatus: MockMarket['status']
+  currentValue: number
+  claimable: boolean
+  claimableAmount: number
+}
+
+interface MockPortfolio {
+  wallet: string
+  positions: MockPortfolioPosition[]
+  totalStaked: number
+  totalClaimable: number
+  history: {
+    id: string
+    marketId: string
+    type: string
+    payload: Record<string, unknown>
+    chainTxHash: string | null
+    confirmed: boolean
+    createdAt: string
+  }[]
+}
+
+export const mockMarkets: MockMarket[] = [
   {
     id: 'mkt-001',
     question: 'Will the 2020s be remembered as the decade AI surpassed human-level reasoning?',
@@ -117,7 +196,7 @@ export const mockMarkets: Market[] = [
   },
 ]
 
-export const mockEvidence: Evidence[] = [
+export const mockEvidence: MockEvidence[] = [
   {
     id: 'ev-001',
     marketId: 'mkt-001',
@@ -160,7 +239,7 @@ export const mockEvidence: Evidence[] = [
   },
 ]
 
-export const mockAdjudication: AdjudicationResult = {
+export const mockAdjudication: MockAdjudicationResult = {
   marketId: 'mkt-005',
   verdict: 'yes',
   confidence: 0.87,
@@ -196,7 +275,7 @@ export const mockAdjudication: AdjudicationResult = {
   settledAt: '2031-01-02T00:08:00Z',
 }
 
-export const mockPortfolio: Portfolio = {
+export const mockPortfolio: MockPortfolio = {
   wallet: '0x7a2f1c9d4e8b3f0a5d6c7e8f9a0b1c2d3e4f9c31',
   totalStaked: 24500,
   totalClaimable: 3200,
