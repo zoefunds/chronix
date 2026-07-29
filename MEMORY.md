@@ -69,9 +69,14 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   2 machines (iad + lhr), `fly-postgres` cluster `chronix-db` (single node, iad — see gotcha
   below) attached via `DATABASE_URL`. All secrets set via `fly secrets set` (JWT_SECRET,
   CONTRACT_ADDRESS, GENLAYER_RPC_URL, GENLAYER_CHAIN_ID, SIWE_DOMAIN, SIWE_URI, CORS_ORIGIN,
-  REDIS_URL). `GENLAYER_KEEPER_PRIVATE_KEY` is NOT set — the keeper job no-ops (logs a warning)
-  until a funded keeper account is generated and set; markets can still be advanced manually by
-  any wallet calling `request_adjudication`/`settle` directly in the meantime.
+  REDIS_URL, GENLAYER_KEEPER_PRIVATE_KEY). Keeper wallet address:
+  `0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb` — user supplied the private key directly in
+  chat on 2026-07-30; set as a Fly secret and in gitignored `backend/.env` only, never
+  committed, never echoed back after the initial confirmation. This account only ever calls
+  non-payable, fully-permissionless `request_adjudication`/`settle` (see trust-model note
+  above) — it cannot move user funds even if compromised, but it does need to be funded with
+  a small amount of GEN (GenLayer Studio faucet) to pay its own gas, or the keeper job will
+  fail with an insufficient-balance error and fall back to manual advancement.
 - **Frontend**: **DEPLOYED** — https://chronix-app.vercel.app, Vercel project `chronix`
   (scope `adebiyi2002gmailcoms-projects`). SSO deployment protection disabled (was blocking
   public access by default). Vercel auto-generates a second default domain
@@ -139,9 +144,9 @@ deployment state, gotchas, and open TODOs for the Chronix project.
         preview cards — lower priority, cosmetic only.
       - claimPayout/claimTimeoutRefund/cancelMarket buttons don't exist in the UI yet at all
         (only implemented in `frontend/src/lib/genlayer.ts`, not called from any page).
-- [ ] Generate + fund a `GENLAYER_KEEPER_PRIVATE_KEY` so `request_adjudication`/`settle` run
-      fully automatically instead of requiring a manual wallet call once a market's deadline
-      passes.
+- [x] `GENLAYER_KEEPER_PRIVATE_KEY` set (2026-07-30). Still needs the keeper address
+      (`0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`) funded with GEN via the Studio faucet
+      before `request_adjudication`/`settle` will actually run automatically.
 - [ ] Fly Postgres is single-node — no HA. Consider a 3-node cluster before real usage.
 - [ ] Review contract test coverage once `contracts/tests/` lands — GenVM likely can't run
       under pytest directly, so tests target the pure-logic helpers (bps math, ledger-zeroing
