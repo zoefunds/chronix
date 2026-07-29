@@ -17,20 +17,26 @@ import {
   listPositionsForMarket,
 } from "../db/repositories.js";
 import { withTransaction } from "../db/pool.js";
+import { cacheGetOrSet } from "../lib/cache.js";
+import { env } from "../config.js";
 
 export async function marketsRoutes(fastify: FastifyInstance) {
   // GET /markets — list + filter by horizon/category/status
   fastify.get("/markets", async (request, reply) => {
     const q = marketsQuerySchema.parse(request.query);
-    const { rows, total } = await listMarkets({
-      horizonMin: q.horizonMin ?? q.horizon,
-      horizonMax: q.horizonMax ?? q.horizon,
-      category: q.category,
-      status: q.status,
-      limit: q.limit,
-      offset: q.offset,
+    const cacheKey = `markets:list:${JSON.stringify(q)}`;
+    const result = await cacheGetOrSet(cacheKey, env.REDIS_CACHE_TTL_SECONDS, async () => {
+      const { rows, total } = await listMarkets({
+        horizonMin: q.horizonMin ?? q.horizon,
+        horizonMax: q.horizonMax ?? q.horizon,
+        category: q.category,
+        status: q.status,
+        limit: q.limit,
+        offset: q.offset,
+      });
+      return { markets: rows, total, limit: q.limit, offset: q.offset };
     });
-    return reply.send({ markets: rows, total, limit: q.limit, offset: q.offset });
+    return reply.send(result);
   });
 
   // POST /markets — record creation intent; never "confirmed" until chain receipt confirms.
@@ -86,7 +92,9 @@ export async function marketsRoutes(fastify: FastifyInstance) {
   // GET /markets/:id
   fastify.get("/markets/:id", async (request, reply) => {
     const { id } = marketIdParamSchema.parse(request.params);
-    const market = await getMarketById(id);
+    const market = await cacheGetOrSet(`markets:detail:${id}`, env.REDIS_CACHE_TTL_SECONDS, () =>
+      getMarketById(id)
+    );
     if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
     return reply.send({ market });
   });

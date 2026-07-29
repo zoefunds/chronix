@@ -24,6 +24,11 @@ const envSchema = z.object({
   GENLAYER_RPC_URL: z.string().default("https://studio.genlayer.com/api"),
   GENLAYER_CHAIN_ID: z.coerce.number().int().default(61999),
 
+  // Optional. Best-effort read cache only (see src/lib/cache.ts) — never a
+  // dependency for correctness. Leave unset to disable caching entirely.
+  REDIS_URL: z.string().optional(),
+  REDIS_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(15),
+
   DEADLINE_ENFORCER_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   CHAIN_RECONCILER_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
   CHAIN_SYNC_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
