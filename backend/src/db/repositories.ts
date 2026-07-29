@@ -25,6 +25,13 @@ export interface MarketRow {
   resolves_at: string;
   created_at: string;
   deadline_enforced_at: string | null;
+  // Live financial figures, mirrored from get_market() by the chain indexer.
+  pool_deposited_wei: string;
+  total_yes_wei: string;
+  total_no_wei: string;
+  verdict: string | null;
+  // Only present on listMarkets/getMarketById responses (LEFT JOIN count).
+  participant_count?: string;
 }
 
 export interface PositionRow {
@@ -142,12 +149,21 @@ export async function insertMarket(params: {
  */
 export async function syncMarketFromChain(
   marketId: string,
-  chain: { status: MarketStatus; verdict?: string }
+  chain: {
+    status: MarketStatus;
+    verdict?: string;
+    poolDepositedWei: string;
+    totalYesWei: string;
+    totalNoWei: string;
+  }
 ): Promise<void> {
-  await query(`UPDATE markets SET status = $2 WHERE id = $1 AND status IS DISTINCT FROM $2`, [
-    marketId,
-    chain.status,
-  ]);
+  await query(
+    `UPDATE markets
+     SET status = $2, pool_deposited_wei = $3, total_yes_wei = $4, total_no_wei = $5,
+         verdict = COALESCE($6, verdict)
+     WHERE id = $1`,
+    [marketId, chain.status, chain.poolDepositedWei, chain.totalYesWei, chain.totalNoWei, chain.verdict ?? null]
+  );
 }
 
 /** Markets that have an on-chain id and are still in a mutable lifecycle state. */
@@ -162,8 +178,17 @@ export async function findActiveChainMarkets(): Promise<MarketRow[]> {
   return res.rows;
 }
 
+const MARKET_WITH_PARTICIPANTS_SELECT = `
+  SELECT m.*, COUNT(DISTINCT p.wallet_address)::text AS participant_count
+  FROM markets m
+  LEFT JOIN positions p ON p.market_id = m.id
+`;
+
 export async function getMarketById(id: string): Promise<MarketRow | null> {
-  const res = await query<MarketRow>(`SELECT * FROM markets WHERE id = $1`, [id]);
+  const res = await query<MarketRow>(
+    `${MARKET_WITH_PARTICIPANTS_SELECT} WHERE m.id = $1 GROUP BY m.id`,
+    [id]
+  );
   return res.rows[0] ?? null;
 }
 
@@ -182,25 +207,25 @@ export async function listMarkets(filter: MarketFilter): Promise<{ rows: MarketR
 
   if (filter.category) {
     params.push(filter.category);
-    conditions.push(`category = $${params.length}`);
+    conditions.push(`m.category = $${params.length}`);
   }
   if (filter.status) {
     params.push(filter.status);
-    conditions.push(`status = $${params.length}`);
+    conditions.push(`m.status = $${params.length}`);
   }
   if (filter.horizonMin !== undefined) {
     params.push(filter.horizonMin);
-    conditions.push(`horizon_years >= $${params.length}`);
+    conditions.push(`m.horizon_years >= $${params.length}`);
   }
   if (filter.horizonMax !== undefined) {
     params.push(filter.horizonMax);
-    conditions.push(`horizon_years <= $${params.length}`);
+    conditions.push(`m.horizon_years <= $${params.length}`);
   }
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
   const countRes = await query<{ count: string }>(
-    `SELECT count(*)::text as count FROM markets ${whereClause}`,
+    `SELECT count(*)::text as count FROM markets m ${whereClause}`,
     params
   );
 
@@ -210,7 +235,8 @@ export async function listMarkets(filter: MarketFilter): Promise<{ rows: MarketR
   const offsetIdx = params.length;
 
   const res = await query<MarketRow>(
-    `SELECT * FROM markets ${whereClause} ORDER BY created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    `${MARKET_WITH_PARTICIPANTS_SELECT} ${whereClause}
+     GROUP BY m.id ORDER BY m.created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     params
   );
 

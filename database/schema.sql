@@ -39,7 +39,13 @@ CREATE TABLE IF NOT EXISTS markets (
     status                  market_status NOT NULL DEFAULT 'pending_chain',
     resolves_at              TIMESTAMPTZ NOT NULL,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deadline_enforced_at    TIMESTAMPTZ          -- set only once the on-chain deadline check confirms it
+    deadline_enforced_at    TIMESTAMPTZ,         -- set only once the on-chain deadline check confirms it
+    -- Live financial figures, mirrored from the contract's own get_market()
+    -- by the chain indexer job — Postgres is a read cache, chain is truth.
+    pool_deposited_wei      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+    total_yes_wei           NUMERIC(78, 0) NOT NULL DEFAULT 0,
+    total_no_wei            NUMERIC(78, 0) NOT NULL DEFAULT 0,
+    verdict                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status);

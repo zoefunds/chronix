@@ -41,9 +41,19 @@ function mapContractStatus(chainStatus: string): MarketStatus {
 
 async function reconcileOne(market: MarketRow, chain: ChainMarket): Promise<void> {
   const mapped = mapContractStatus(chain.status);
-  if (mapped === market.status) return;
 
-  await syncMarketFromChain(market.id, { status: mapped });
+  // Financial figures (stake totals, pool) can change every single stake tx,
+  // independent of a status transition — sync them every pass, not just when
+  // status changes, so the Discover/MarketDetail UI never shows stale totals.
+  await syncMarketFromChain(market.id, {
+    status: mapped,
+    verdict: chain.verdict || undefined,
+    poolDepositedWei: chain.poolDeposited,
+    totalYesWei: chain.totalYes,
+    totalNoWei: chain.totalNo,
+  });
+
+  if (mapped === market.status) return;
 
   if (chain.status === "awaiting_adjudication") {
     // Deadline was just confirmed passed (by this or another wallet's
