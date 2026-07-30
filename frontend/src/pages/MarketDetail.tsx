@@ -45,6 +45,8 @@ export default function MarketDetail() {
   const [staking, setStaking] = useState(false)
   const [stakeError, setStakeError] = useState<string | null>(null)
   const [stakeStep, setStakeStep] = useState<'idle' | 'signing' | 'recording'>('idle')
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -111,6 +113,21 @@ export default function MarketDetail() {
     } finally {
       setStaking(false)
       setStakeStep('idle')
+    }
+  }
+
+  async function handleCancel() {
+    if (!market || !market.contract_market_id || !wallet) return
+    setCancelError(null)
+    setCancelling(true)
+    try {
+      await genlayer.cancelMarket(wallet as Address, Number(market.contract_market_id))
+      const refreshed = await api.getMarket(market.id)
+      setMarket(refreshed)
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : 'Cancel failed — the contract rejected this call.')
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -319,6 +336,23 @@ export default function MarketDetail() {
               <span className="font-label text-label-md text-primary">{market.participant_count ?? 0}</span>
             </div>
           </Card>
+
+          {wallet &&
+            market.created_by.toLowerCase() === wallet.toLowerCase() &&
+            market.status === 'open' &&
+            market.total_yes_wei === '0' &&
+            market.total_no_wei === '0' && (
+              <Card className="p-4 flex flex-col gap-2">
+                <Label>Creator actions</Label>
+                <p className="text-body-sm text-on-surface-variant">
+                  No one has staked yet — you can still cancel this market and reclaim your initial liquidity.
+                </p>
+                {cancelError && <p className="text-label-sm font-label text-error">{cancelError}</p>}
+                <Button variant="outline" disabled={cancelling} onClick={handleCancel}>
+                  {cancelling ? 'Cancelling…' : 'Cancel Market & Reclaim Liquidity'}
+                </Button>
+              </Card>
+            )}
         </div>
       </div>
     </div>

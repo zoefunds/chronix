@@ -160,6 +160,20 @@ export const api = {
     return res.events
   },
 
+  /** GET /markets/:id/trace — real GenVM execution trace for the settle() tx, if available */
+  getTrace: (id: string) =>
+    request<{
+      trace: {
+        resultCode: number
+        returnData: string
+        stdout: string
+        stderr: string
+        eqOutputs: string[]
+        genvmLog: Record<string, unknown>[]
+      } | null
+      reason: string | null
+    }>(`/markets/${id}/trace`),
+
   /** GET /portfolio/:wallet */
   getPortfolio: (wallet: string) => request<Portfolio>(`/portfolio/${wallet}`),
 

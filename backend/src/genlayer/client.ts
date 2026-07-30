@@ -212,6 +212,41 @@ export const genlayerClient = {
       interval: 3000,
     });
   },
+
+  /**
+   * Reads the real GenVM execution trace for a settle() transaction —
+   * return_data (the decoded verdict), eq_outputs (each validator's
+   * independent nondet-block result, i.e. actual per-validator agreement,
+   * not a fabricated summary), and stdout/stderr/genvm_log if present.
+   * Best-effort: some GenLayer runner versions or already-finalized old
+   * transactions may not retain a queryable trace, so this returns null on
+   * any error rather than throwing — callers must treat a null trace as
+   * "not available", not as an error condition.
+   */
+  async getTransactionTrace(txHash: string): Promise<{
+    resultCode: number;
+    returnData: string;
+    stdout: string;
+    stderr: string;
+    eqOutputs: string[];
+    genvmLog: Record<string, unknown>[];
+  } | null> {
+    try {
+      const client = getReadClient();
+      const trace = await client.debugTraceTransaction({ hash: txHash as Hash });
+      return {
+        resultCode: trace.result_code,
+        returnData: trace.return_data,
+        stdout: trace.stdout,
+        stderr: trace.stderr,
+        eqOutputs: trace.eq_outputs ?? [],
+        genvmLog: trace.genvm_log ?? [],
+      };
+    } catch (err) {
+      logger.warn({ err, txHash }, "Could not read GenVM execution trace for transaction");
+      return null;
+    }
+  },
 };
 
 export type GenLayerClientWrapper = typeof genlayerClient;

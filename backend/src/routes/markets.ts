@@ -21,6 +21,7 @@ import {
 import { withTransaction } from "../db/pool.js";
 import { cacheGetOrSet } from "../lib/cache.js";
 import { env } from "../config.js";
+import { genlayerClient } from "../genlayer/client.js";
 
 export async function marketsRoutes(fastify: FastifyInstance) {
   // GET /evidence — global feed across every market, newest first. Powers
@@ -239,5 +240,25 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
     const events = await listEventsForMarket(id);
     return reply.send({ events });
+  });
+
+  // GET /markets/:id/trace — real GenVM execution trace for this market's
+  // settle() transaction (per-validator eq_outputs, return_data, stdout/
+  // stderr), read live from the chain via debugTraceTransaction. Returns
+  // { trace: null } if no settle tx is recorded yet, or if the runner can't
+  // produce a trace for it (e.g. already finalized/pruned) — never fabricated.
+  fastify.get("/markets/:id/trace", async (request, reply) => {
+    const { id } = marketIdParamSchema.parse(request.params);
+    const market = await getMarketById(id);
+    if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+
+    const events = await listEventsForMarket(id);
+    const settledEvent = events.find((e) => e.type === "verdict_settled" && e.chain_tx_hash);
+    if (!settledEvent?.chain_tx_hash) {
+      return reply.send({ trace: null, reason: "Market has not settled yet, or no tx hash was recorded." });
+    }
+
+    const trace = await genlayerClient.getTransactionTrace(settledEvent.chain_tx_hash);
+    return reply.send({ trace, reason: trace ? null : "Execution trace not available for this transaction." });
   });
 }

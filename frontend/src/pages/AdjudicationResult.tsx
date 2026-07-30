@@ -8,6 +8,15 @@ import { formatGen } from '../lib/format'
 import type { Address } from 'genlayer-js/types'
 import type { AdjudicationStatus, Evidence, Market, MarketEvent } from '../types'
 
+type Trace = {
+  resultCode: number
+  returnData: string
+  stdout: string
+  stderr: string
+  eqOutputs: string[]
+  genvmLog: Record<string, unknown>[]
+} | null
+
 const verdictStyles: Record<string, string> = {
   YES: 'text-resolved-emerald border-resolved-emerald/30 bg-resolved-emerald/10',
   NO: 'text-error border-error/30 bg-error/10',
@@ -22,6 +31,8 @@ export default function AdjudicationResultPage() {
   const [adjudication, setAdjudication] = useState<AdjudicationStatus | null>(null)
   const [events, setEvents] = useState<MarketEvent[]>([])
   const [evidence, setEvidence] = useState<Evidence[]>([])
+  const [trace, setTrace] = useState<Trace>(null)
+  const [traceReason, setTraceReason] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [claiming, setClaiming] = useState(false)
@@ -33,13 +44,21 @@ export default function AdjudicationResultPage() {
     let cancelled = false
     setLoading(true)
     setError(null)
-    Promise.all([api.getMarket(id), api.getAdjudication(id), api.getMarketEvents(id), api.getMarketEvidence(id)])
-      .then(([m, a, ev, ep]) => {
+    Promise.all([
+      api.getMarket(id),
+      api.getAdjudication(id),
+      api.getMarketEvents(id),
+      api.getMarketEvidence(id),
+      api.getTrace(id),
+    ])
+      .then(([m, a, ev, ep, tr]) => {
         if (cancelled) return
         setMarket(m)
         setAdjudication(a)
         setEvents(ev)
         setEvidence(ep)
+        setTrace(tr.trace)
+        setTraceReason(tr.reason)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load adjudication result.')
@@ -161,9 +180,65 @@ export default function AdjudicationResultPage() {
         </div>
         <p className="text-label-sm font-label text-on-surface-variant mt-4 italic">
           Note: these are submitted pointers only. The contract's own settle() nondet web-fetch
-          is the sole authoritative evaluation — a detailed reasoning trace isn't surfaced here
-          yet (would require reading the contract's GenVM execution trace).
+          — read directly from the chain below — is the sole authoritative evaluation.
         </p>
+      </Card>
+
+      <Card className="p-4">
+        <Label className="block mb-3">GenVM execution trace (settle() consensus)</Label>
+        {!trace && (
+          <p className="text-body-sm text-on-surface-variant">
+            {traceReason ?? 'No execution trace available for this market yet.'}
+          </p>
+        )}
+        {trace && (
+          <div className="flex flex-col gap-4">
+            <div>
+              <Label className="block mb-1">Decoded return value</Label>
+              <pre className="text-body-sm text-primary bg-surface-container-low p-3 rounded-sm overflow-x-auto whitespace-pre-wrap">
+                {trace.returnData || '(empty)'}
+              </pre>
+            </div>
+            {trace.eqOutputs.length > 0 && (
+              <div>
+                <Label className="block mb-1">
+                  Per-validator equivalence-principle outputs ({trace.eqOutputs.length} validator{trace.eqOutputs.length === 1 ? '' : 's'})
+                </Label>
+                <p className="text-label-sm font-label text-on-surface-variant mb-2">
+                  Each validator independently re-fetched and re-classified the evidence sources; these are their
+                  raw nondet results, compared for agreement by the contract's own consensus check — not a
+                  single leader's unverified claim.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {trace.eqOutputs.map((out, i) => (
+                    <pre
+                      key={i}
+                      className="text-body-sm text-on-surface bg-surface-container-low p-3 rounded-sm overflow-x-auto whitespace-pre-wrap"
+                    >
+                      Validator {i + 1}: {out}
+                    </pre>
+                  ))}
+                </div>
+              </div>
+            )}
+            {trace.stdout && (
+              <div>
+                <Label className="block mb-1">stdout</Label>
+                <pre className="text-body-sm text-on-surface-variant bg-surface-container-low p-3 rounded-sm overflow-x-auto whitespace-pre-wrap">
+                  {trace.stdout}
+                </pre>
+              </div>
+            )}
+            {trace.stderr && (
+              <div>
+                <Label className="block mb-1">stderr</Label>
+                <pre className="text-body-sm text-error bg-surface-container-low p-3 rounded-sm overflow-x-auto whitespace-pre-wrap">
+                  {trace.stderr}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
       <Card className="p-4 flex items-center justify-between">
