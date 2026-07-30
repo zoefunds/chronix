@@ -303,6 +303,32 @@ export async function listPositionsForWallet(wallet: string): Promise<PositionRo
   return res.rows;
 }
 
+export interface PortfolioPositionRow extends PositionRow {
+  market_question: string;
+  market_status: MarketStatus;
+  contract_market_id: string | null;
+}
+
+/**
+ * Same as listPositionsForWallet but joined with markets for the fields the
+ * Portfolio page needs to render without an extra round trip per row. Claim
+ * *eligibility* is still decided by the contract itself when the user
+ * actually calls claim_payout/claim_timeout_refund — this join only drives
+ * whether the UI shows a Claim button at all (settled/cancelled markets),
+ * never how much or whether it will succeed.
+ */
+export async function listPortfolioPositionsForWallet(wallet: string): Promise<PortfolioPositionRow[]> {
+  const res = await query<PortfolioPositionRow>(
+    `SELECT p.*, m.question AS market_question, m.status AS market_status, m.contract_market_id
+     FROM positions p
+     JOIN markets m ON m.id = p.market_id
+     WHERE p.wallet_address = $1
+     ORDER BY p.created_at DESC`,
+    [wallet]
+  );
+  return res.rows;
+}
+
 export async function insertPosition(params: {
   marketId: string;
   walletAddress: string;

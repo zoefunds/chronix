@@ -1,9 +1,10 @@
 import type {
-  AdjudicationResult,
+  AdjudicationStatus,
   CreateMarketPayload,
   Evidence,
   EvidenceWithMarket,
   Market,
+  MarketEvent,
   Portfolio,
   Position,
 } from '../types'
@@ -151,7 +152,13 @@ export const api = {
   },
 
   /** GET /markets/:id/adjudicate — read-only adjudication status/result */
-  getAdjudication: (id: string) => request<AdjudicationResult>(`/markets/${id}/adjudicate`),
+  getAdjudication: (id: string) => request<AdjudicationStatus>(`/markets/${id}/adjudicate`),
+
+  /** GET /markets/:id/events — real, ordered market_events history */
+  async getMarketEvents(id: string) {
+    const res = await request<{ events: MarketEvent[] }>(`/markets/${id}/events`)
+    return res.events
+  },
 
   /** GET /portfolio/:wallet */
   getPortfolio: (wallet: string) => request<Portfolio>(`/portfolio/${wallet}`),

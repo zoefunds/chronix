@@ -91,30 +91,45 @@ export interface EvidenceWithMarket extends Evidence {
   market_question: string
 }
 
-export interface AdjudicationResult {
+/**
+ * Matches the real GET /markets/:id/adjudicate response exactly. There is
+ * no confidence score, source-weight breakdown, or reasoning-step timeline
+ * here — that data would come from the contract's own nondet execution
+ * trace, which nothing in this backend reads or stores yet (see MEMORY.md).
+ * The UI builds its timeline from real market_events rows instead (see
+ * GET /markets/:id/events) — genuine recorded history, not a fabricated
+ * play-by-play.
+ */
+export interface AdjudicationStatus {
   marketId: string
-  verdict: 'yes' | 'no' | 'undetermined'
-  confidence: number
-  sourceWeights: { sourceType: EvidenceSourceType; weight: number; sourcesConsulted: number }[]
-  reasoningTimeline: { timestamp: string; step: string; detail: string }[]
-  evidenceArtifacts: Evidence[]
-  settledAt: string | null
+  status: MarketStatus
+  resolvesAt: string
+  deadlineEnforcedAt: string | null
+  adjudication: {
+    requested: boolean
+    settled: boolean
+    verdict: Record<string, unknown> | null
+  }
 }
 
+/**
+ * Matches backend PortfolioPositionRow (GET /portfolio/:wallet) — a Position
+ * joined with its market's question/status/contract_market_id. There is no
+ * pre-computed "claimable"/"claimableAmount" here: the contract itself is
+ * the only thing that knows whether a specific wallet's stake resolves to a
+ * positive payout, so the UI shows a Claim button whenever the market's
+ * status makes it *possible* (settled/cancelled) and lets the on-chain call
+ * itself succeed or revert with the real reason.
+ */
 export interface PortfolioPosition extends Position {
-  marketQuestion: string
-  marketStatus: MarketStatus
-  currentValue: number
-  claimable: boolean
-  claimableAmount: number
+  market_question: string
+  market_status: MarketStatus
+  contract_market_id: string | null
 }
 
 export interface Portfolio {
   wallet: string
   positions: PortfolioPosition[]
-  totalStaked: number
-  totalClaimable: number
-  history: MarketEvent[]
 }
 
 export interface CreateMarketPayload {

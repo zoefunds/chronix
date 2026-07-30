@@ -227,4 +227,17 @@ export async function marketsRoutes(fastify: FastifyInstance) {
       },
     });
   });
+
+  // GET /markets/:id/events — real, ordered market_events history. This is
+  // what the Adjudication Result page's timeline is actually built from —
+  // genuine recorded lifecycle events, not a fabricated reasoning trace
+  // (the contract's own nondet execution trace isn't read/stored anywhere
+  // in this backend yet — see MEMORY.md).
+  fastify.get("/markets/:id/events", async (request, reply) => {
+    const { id } = marketIdParamSchema.parse(request.params);
+    const market = await getMarketById(id);
+    if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+    const events = await listEventsForMarket(id);
+    return reply.send({ events });
+  });
 }

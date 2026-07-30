@@ -1,13 +1,9 @@
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Label } from '../components/ui'
-import { mockMarkets } from '../lib/mockData'
-
-const stats = [
-  { label: 'Total Value Staked', value: '$4.2M' },
-  { label: 'Markets Live', value: '312' },
-  { label: 'Adjudications Settled', value: '891' },
-  { label: 'Avg. Horizon', value: '6.4 yrs' },
-]
+import { api } from '../lib/api'
+import { formatGen } from '../lib/format'
+import type { Market } from '../types'
 
 const steps = [
   {
@@ -30,6 +26,49 @@ const steps = [
 
 export default function Landing() {
   const navigate = useNavigate()
+  const [markets, setMarkets] = useState<Market[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .listMarkets({})
+      .then((rows) => {
+        if (!cancelled) setMarkets(rows)
+      })
+      .catch(() => {
+        // Landing page degrades quietly to an empty trending section — the
+        // error is already surfaced loudly on Discover, no need to repeat it here.
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const settledCount = markets.filter((m) => m.status === 'settled').length
+  const totalStakedWei = markets.reduce(
+    (sum, m) =>
+      sum + BigInt(m.total_yes_wei || '0') + BigInt(m.total_no_wei || '0') + BigInt(m.pool_deposited_wei || '0'),
+    0n
+  )
+  const avgHorizonYears = markets.length
+    ? (
+        markets.reduce((sum, m) => sum + Math.min(Number(m.horizon_years), 100), 0) / markets.length
+      ).toFixed(1)
+    : '0'
+
+  const stats = [
+    { label: 'Total Value Staked', value: `${formatGen(totalStakedWei.toString())} GEN` },
+    { label: 'Markets Live', value: String(markets.length) },
+    { label: 'Adjudications Settled', value: String(settledCount) },
+    { label: 'Avg. Horizon', value: `${avgHorizonYears} yrs` },
+  ]
+
+  const trending = markets.slice(0, 3)
+
   return (
     <div className="flex flex-col gap-16 py-6">
       <section className="flex flex-col gap-6 max-w-2xl">
@@ -84,22 +123,39 @@ export default function Landing() {
             View all →
           </Button>
         </div>
-        <div className="grid md:grid-cols-3 gap-4">
-          {mockMarkets.slice(0, 3).map((m) => (
-            <Card
-              key={m.id}
-              onClick={() => navigate(`/markets/${m.id}`)}
-              className="p-4 flex flex-col gap-3 cursor-pointer hover:border-secondary transition-colors"
-            >
-              <Label>{m.category}</Label>
-              <p className="font-headline text-headline-md text-primary leading-snug">{m.question}</p>
-              <div className="flex justify-between text-label-md font-label text-on-surface-variant">
-                <span>${m.totalStaked.toLocaleString()} staked</span>
-                <span>{m.participantCount} participants</span>
-              </div>
-            </Card>
-          ))}
-        </div>
+        {loading && <div className="text-center text-on-surface-variant text-body-sm py-8">Loading live markets…</div>}
+
+        {!loading && trending.length === 0 && (
+          <div className="text-center text-on-surface-variant text-body-sm py-8">
+            No markets yet — be the first to create one.
+          </div>
+        )}
+
+        {!loading && trending.length > 0 && (
+          <div className="grid md:grid-cols-3 gap-4">
+            {trending.map((m) => {
+              const stakedWei = (
+                BigInt(m.total_yes_wei || '0') +
+                BigInt(m.total_no_wei || '0') +
+                BigInt(m.pool_deposited_wei || '0')
+              ).toString()
+              return (
+                <Card
+                  key={m.id}
+                  onClick={() => navigate(`/markets/${m.id}`)}
+                  className="p-4 flex flex-col gap-3 cursor-pointer hover:border-secondary transition-colors"
+                >
+                  <Label>{m.category}</Label>
+                  <p className="font-headline text-headline-md text-primary leading-snug">{m.question}</p>
+                  <div className="flex justify-between text-label-md font-label text-on-surface-variant">
+                    <span>{formatGen(stakedWei)} GEN staked</span>
+                    <span>{m.participant_count ?? 0} participants</span>
+                  </div>
+                </Card>
+              )
+            })}
+          </div>
+        )}
       </section>
     </div>
   )
