@@ -181,7 +181,8 @@ export const api = {
   health: () => request<{ status: string }>('/health'),
 
   // --- Auth: SIWE nonce + verify (backend endpoints per PLANNING.md auth flow) ---
-  getNonce: (wallet: string) => request<{ nonce: string }>(`/auth/nonce${toQuery({ wallet })}`),
+  getNonce: (wallet: string) =>
+    request<{ nonce: string }>('/auth/nonce', { method: 'POST', body: JSON.stringify({ wallet }) }),
 
   verifySiwe: (payload: { message: string; signature: string }) =>
     request<{ token: string; wallet: string }>('/auth/verify', {
