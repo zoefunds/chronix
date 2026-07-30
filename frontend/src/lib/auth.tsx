@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useState, type ReactNo
 import { useAccount, useDisconnect, useSignMessage } from 'wagmi'
 import { SiweMessage } from 'siwe'
 import { api } from './api'
+import { genlayerStudio } from './wagmi'
 
 interface AuthState {
   wallet: string | null
@@ -52,7 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         statement: 'Sign in to Chronix with your wallet. No email or password required.',
         uri: window.location.origin,
         version: '1',
-        chainId: chainId ?? 1,
+        chainId: chainId ?? genlayerStudio.id,
         nonce,
       })
       const message = siweMessage.prepareMessage()

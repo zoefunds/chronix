@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useAccount, useConnect, useDisconnect } from 'wagmi'
+import { useAccount, useDisconnect } from 'wagmi'
+import { useAppKit } from '@reown/appkit/react'
 import { useAuth } from '../lib/auth'
 import { Button } from './ui'
 
@@ -9,10 +9,9 @@ function shortAddr(addr: string) {
 
 export default function WalletButton() {
   const { address, isConnected } = useAccount()
-  const { connectors, connect, isPending } = useConnect()
   const { disconnect } = useDisconnect()
+  const { open } = useAppKit()
   const { status, signIn, signOut, wallet } = useAuth()
-  const [open, setOpen] = useState(false)
 
   if (wallet && status === 'authenticated') {
     return (
@@ -29,8 +28,12 @@ export default function WalletButton() {
     return (
       <div className="flex items-center gap-2">
         <span className="font-label text-label-md text-on-surface-variant">{shortAddr(address)}</span>
-        <Button variant="secondary" onClick={signIn} disabled={status === 'requesting-nonce' || status === 'awaiting-signature' || status === 'verifying'}>
-          {status === 'awaiting-signature' ? 'Sign message…' : status === 'verifying' ? 'Verifying…' : 'Sign-In With Ethereum'}
+        <Button
+          variant="secondary"
+          onClick={signIn}
+          disabled={status === 'requesting-nonce' || status === 'awaiting-signature' || status === 'verifying'}
+        >
+          {status === 'awaiting-signature' ? 'Sign message…' : status === 'verifying' ? 'Verifying…' : 'Verify Wallet'}
         </Button>
         <Button variant="ghost" onClick={() => disconnect()}>
           Disconnect
@@ -39,28 +42,11 @@ export default function WalletButton() {
     )
   }
 
+  // Opens Reown's real connect modal (MetaMask/injected, WalletConnect QR +
+  // mobile deep-links, Coinbase — a proper wallet picker, not a bare list).
   return (
-    <div className="relative">
-      <Button variant="outline" onClick={() => setOpen((o) => !o)}>
-        Connect Wallet
-      </Button>
-      {open && (
-        <div className="absolute right-0 mt-2 w-56 bg-surface-container-high border border-border-slate rounded-md shadow-lg z-50 p-1">
-          {connectors.map((c) => (
-            <button
-              key={c.uid}
-              disabled={isPending}
-              onClick={() => {
-                connect({ connector: c })
-                setOpen(false)
-              }}
-              className="w-full text-left px-3 py-2 text-body-sm text-on-surface hover:bg-surface-variant hover:text-secondary rounded transition-colors"
-            >
-              {c.name}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <Button variant="outline" onClick={() => open()}>
+      Connect Wallet
+    </Button>
   )
 }
