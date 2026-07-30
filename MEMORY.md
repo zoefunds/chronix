@@ -81,11 +81,18 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   fail with an insufficient-balance error and fall back to manual advancement.
 - **Frontend**: **DEPLOYED** — https://chronix-app.vercel.app, Vercel project `chronix`
   (scope `adebiyi2002gmailcoms-projects`). SSO deployment protection disabled (was blocking
-  public access by default). Vercel auto-generates a second default domain
-  (`chronix-ecru.vercel.app` or similar) on every prod deploy — remove it after each deploy
-  with `vercel alias rm <that-domain> --yes --scope adebiyi2002gmailcoms-projects` and re-point
-  `chronix-app.vercel.app` to the new deployment URL with `vercel alias set`, since aliases
-  don't auto-follow new deployments.
+  public access by default).
+  **Deploy routine (do EVERY time, not optional)**: `vercel --prod --yes` does NOT move
+  `chronix-app.vercel.app` to the new build — it stays pointed at whatever deployment it was
+  last aliased to. After every deploy, run:
+  `vercel alias set <new-deployment-url> chronix-app.vercel.app`
+  (verify with `curl -sI` on both URLs and compare the `etag` header — matching etags confirm
+  they're serving the same build). `chronix-ecru.vercel.app` was the project's own auto-managed
+  default alias (distinct from the per-deployment `chronix-<hash>...` URLs) — removed entirely
+  on 2026-07-30 via `vercel alias rm chronix-ecru.vercel.app --yes` per user request. If it
+  reappears after a future deploy (Vercel may re-auto-assign a project default domain), just
+  remove it again the same way — `chronix-app.vercel.app` is the only domain that should serve
+  this app.
 - **Database**: production is Fly Postgres (`chronix-db`, single-node — NOT highly available;
   an iad regional outage takes down the DB even though the app machines are split iad/lhr. Fine
   for now, worth upgrading to a 3-node cluster before real usage volume — this is a cost/infra
