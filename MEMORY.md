@@ -157,19 +157,24 @@ deployment state, gotchas, and open TODOs for the Chronix project.
       - AdjudicationResult: real market/adjudication-status/evidence from the backend, plus a
         new `GET /markets/:id/events` route exposing real `market_events` rows. The timeline is
         built from these genuine recorded events, not a fabricated reasoning trace.
-      - **Still explicitly NOT real**: per-source "confidence"/"weight" percentages and a
-        step-by-step LLM reasoning narrative. That data only exists inside the contract's GenVM
-        nondet execution trace, which nothing in this backend reads or stores — would need a
-        new capability (likely `debugTraceTransaction` in genlayer-js) before it can be shown
-        honestly. The current UI says so explicitly rather than inventing numbers.
-      - `cancelMarket` (creator-only, pre-participation) is implemented in
-        `frontend/src/lib/genlayer.ts` but has no UI entry point yet — nobody asked for it
-        specifically, low priority.
+- [x] **GenVM execution trace wired (2026-07-30)**: `genlayerClient.getTransactionTrace`
+      (backend) calls the real `debugTraceTransaction` on a market's settle() tx hash (looked up
+      from `market_events`), returning decoded return value, per-validator `eq_outputs` (genuine
+      independent nondet agreement, not a fabricated summary), stdout/stderr. New
+      `GET /markets/:id/trace` route; AdjudicationResult now displays this when available, or an
+      honest "not available yet" message (a market has to actually settle first, and some
+      runner versions may not retain a queryable trace for old/finalized txs — that's handled as
+      a graceful null, not an error).
+- [x] `cancelMarket` UI added: creator-only "Cancel Market & Reclaim Liquidity" button on
+      MarketDetail, shown only pre-participation (both pools at 0), wired to
+      `genlayer.cancelMarket`.
 - [x] Keeper wallet confirmed funded by the user (2026-07-30) — `request_adjudication`/`settle`
       should run automatically now.
 - [x] WalletConnect project ID set (`2825f1eeba8dfe044c9850190dd35d6b`).
-- [ ] Fly Postgres is single-node — no HA. Ask before provisioning a 3-node cluster (cost
-      implication).
+- [x] **Fly Postgres upgraded to a 3-node HA cluster (2026-07-30)**: `chronix-db` now runs 1
+      primary (iad, `e82744ef427158`) + 2 replicas (iad `811d651c960378`, lhr
+      `896d61c6d40778`), all health checks passing. User explicitly authorized the added
+      ongoing cost (2 extra machines + volumes) before this was done.
 - [ ] Review contract test coverage once `contracts/tests/` lands — GenVM likely can't run
       under pytest directly, so tests target the pure-logic helpers (bps math, ledger-zeroing
       order, state-machine transitions) extracted for testability.
