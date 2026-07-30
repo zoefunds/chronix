@@ -171,6 +171,21 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 - [x] Keeper wallet confirmed funded by the user (2026-07-30) — `request_adjudication`/`settle`
       should run automatically now.
 - [x] WalletConnect project ID set (`2825f1eeba8dfe044c9850190dd35d6b`).
+- [x] **Wallet-connect actually targets GenLayer now (2026-07-30)**: `frontend/src/lib/wagmi.ts`
+      was wired to Ethereum mainnet/sepolia only, even though this app never transacts there —
+      only on GenLayer Studio Network (chain id 61999). Fixed by defining that chain directly
+      and driving wallet connection through **Reown AppKit** (`WagmiAdapter` + `createAppKit`)
+      instead of a bare `walletConnect()` connector with no real modal. `WalletButton` now opens
+      the Reown modal (proper multi-wallet picker: injected/MetaMask, WalletConnect QR + mobile
+      deep-links, Coinbase); relabeled "Sign-In With Ethereum" -> "Verify Wallet" since it isn't
+      Ethereum. SIWE's chainId now falls back to the real GenLayer chain id, not `1`.
+      **Gotcha**: installing `@reown/appkit`/`@reown/appkit-adapter-wagmi` needed
+      `--legacy-peer-deps` (an optional-peer conflict via an unrelated privy/permissionless
+      chain, never actually used), which silently *dropped* three packages that are genuinely
+      required at runtime/build even though they're peerDependencies:
+      `@testing-library/dom`, `@wagmi/core@3.6.4` (must match wagmi's own pinned version), and
+      `ethers@^6` (required by `siwe`). All three are now explicit deps in
+      `frontend/package.json` so a fresh `npm install` won't silently break the build again.
 - [x] **Fly Postgres upgraded to a 3-node HA cluster (2026-07-30)**: `chronix-db` now runs 1
       primary (iad, `e82744ef427158`) + 2 replicas (iad `811d651c960378`, lhr
       `896d61c6d40778`), all health checks passing. User explicitly authorized the added
