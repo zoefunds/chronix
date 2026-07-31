@@ -396,9 +396,15 @@ class Chronix(gl.Contract):
         """
 
         def fetch_epoch_seconds() -> int:
-            # worldtimeapi-style JSON: {"unixtime": 1234567890, ...}
-            raw = gl.get_webpage("https://worldtimeapi.org/api/timezone/Etc/UTC", mode="text")
-            data = json.loads(raw)
+            # worldtimeapi-style JSON: {"unixtime": 1234567890, ...}. Plain
+            # JSON API fetch -> gl.nondet.web.get, which returns an object
+            # with .body (bytes) and .status (int), not a raw string (fixed
+            # 2026-07-30: gl.get_webpage doesn't exist on this runner
+            # version; it was renamed/moved to gl.nondet.web.* in a later
+            # GenVM SDK release than the docs snapshot this file was
+            # originally written against).
+            resp = gl.nondet.web.get("https://worldtimeapi.org/api/timezone/Etc/UTC")
+            data = json.loads(resp.body)
             return int(data["unixtime"])
 
         def validator_fn(leader_result) -> bool:
@@ -696,7 +702,7 @@ class Chronix(gl.Contract):
                 category = src["source_type"] or "general"
                 try:
                     if url:
-                        web_text = gl.get_webpage(url, mode="text")
+                        web_text = gl.nondet.web.render(url, mode="text")
                     else:
                         # No submitted pointer for a required category —
                         # fall back to a live web search proxy so the
@@ -706,7 +712,7 @@ class Chronix(gl.Contract):
                             "https://duckduckgo.com/html/?q="
                             + question.replace(" ", "+") + "+" + category
                         )
-                        web_text = gl.get_webpage(search_url, mode="text")
+                        web_text = gl.nondet.web.render(search_url, mode="text")
                 except Exception:
                     # Unreachable source: counts toward total (so a market
                     # with too many dead links correctly fails to reach
@@ -730,7 +736,7 @@ criteria has come true (YES), come false (NO), or is inconclusive
 {{"vote": "YES" | "NO" | "NEITHER", "reason": str}}
 No other text, no markdown fences.
 """
-                raw = gl.exec_prompt(prompt).replace("```json", "").replace("```", "").strip()
+                raw = gl.nondet.exec_prompt(prompt).replace("```json", "").replace("```", "").strip()
                 try:
                     parsed = json.loads(raw)
                     vote = str(parsed.get("vote", "NEITHER")).upper()
