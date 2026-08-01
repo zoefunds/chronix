@@ -56,14 +56,21 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 
 ## Deployment state
 
-- **Contract address**: **DEPLOYED (v2)** — `0xA37d6bFb02dDB3D5155Dc50E88e27751633bF8Dc` on
-  GenLayer Studio/StudioNet, deployed 2026-07-30. This SUPERSEDES the original address
-  `0xF0308C069Fb536D334926A01d2d625467fe77b0e`, which is dead — its first real transaction
-  (`create_market`) reverted with `AttributeError: module 'genlayer.gl' has no attribute
-  'get_webpage'` because the pinned runner had moved that API to `gl.nondet.web.*` (see
-  gotchas below). GenVM contracts are immutable, so this required a full redeploy under a new
-  address, not a patch. Wired into `.env.example`, `backend/.env.example`, `backend/.env`,
-  `frontend/.env.example`, `frontend/.env`, Fly secrets, and Vercel env vars.
+- **Contract address**: **DEPLOYED (v3)** — `0x0a58dAb6DCE66124CE28D79Af4124BaB85A100ED` on
+  GenLayer Studio/StudioNet, deployed 2026-07-31. History of prior dead deployments (GenVM
+  contracts are immutable — every code fix requires a brand-new address, not a patch):
+  - v1 `0xF0308C069Fb536D334926A01d2d625467fe77b0e` — dead. First `create_market` reverted:
+    `AttributeError: module 'genlayer.gl' has no attribute 'get_webpage'` (pinned runner had
+    moved that API to `gl.nondet.web.*`).
+  - v2 `0xA37d6bFb02dDB3D5155Dc50E88e27751633bF8Dc` — dead. Fixed the above, but then
+    `create_market` reverted differently: `NondetException: Connection reset by peer` trying
+    to reach `worldtimeapi.org` from GenVM's sandboxed egress — an external-service
+    reliability issue, not a code bug.
+  - v3 (current) adds fallback across three independent time sources (worldtimeapi.org ->
+    Cloudflare `/cdn-cgi/trace` -> timeapi.io) in `_now()`. Not yet confirmed working by an
+    actual successful `create_market` tx — confirm before trusting this address long-term.
+  Wired into `.env.example`, `backend/.env.example`, `backend/.env`, `frontend/.env.example`,
+  `frontend/.env`, Fly secrets, and Vercel env vars.
 - **Contract header** (do not touch again): the file that actually deployed successfully uses
   `# v0.2.16` + `# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }`
   as the first two lines — this is the user's own edit, confirmed working. An earlier attempt
