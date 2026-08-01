@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Button, Card, Label, StatusChip } from '../components/ui'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
-import { formatGen } from '../lib/format'
+import { formatGen, weiToGen } from '../lib/format'
 import { genlayer } from '../lib/genlayer'
 import type { Address } from 'genlayer-js/types'
 import type { PortfolioPosition } from '../types'
@@ -73,7 +73,7 @@ export default function Portfolio() {
     )
   }
 
-  const totalStakedWei = positions.reduce((sum, p) => sum + BigInt(p.shares || '0'), 0n)
+  const totalStaked = positions.reduce((sum, p) => sum + weiToGen(p.shares), 0)
   const openCount = positions.filter((p) => p.market_status === 'open').length
 
   return (
@@ -87,7 +87,7 @@ export default function Portfolio() {
         <Card className="p-4">
           <Label>Total staked</Label>
           <div className="font-headline text-headline-lg text-primary mt-1">
-            {formatGen(totalStakedWei.toString())} GEN
+            {totalStaked.toLocaleString(undefined, { maximumFractionDigits: 2 })} GEN
           </div>
         </Card>
         <Card className="p-4">
