@@ -396,16 +396,52 @@ class Chronix(gl.Contract):
         """
 
         def fetch_epoch_seconds() -> int:
-            # worldtimeapi-style JSON: {"unixtime": 1234567890, ...}. Plain
-            # JSON API fetch -> gl.nondet.web.get, which returns an object
-            # with .body (bytes) and .status (int), not a raw string (fixed
-            # 2026-07-30: gl.get_webpage doesn't exist on this runner
-            # version; it was renamed/moved to gl.nondet.web.* in a later
-            # GenVM SDK release than the docs snapshot this file was
-            # originally written against).
-            resp = gl.nondet.web.get("https://worldtimeapi.org/api/timezone/Etc/UTC")
-            data = json.loads(resp.body)
-            return int(data["unixtime"])
+            # Multiple independent time sources, tried in order. worldtimeapi.org
+            # alone is known to be flaky (fixed 2026-07-31: a real create_market
+            # tx failed with "Connection reset by peer" reaching it from GenVM's
+            # sandboxed network egress) — this is an external-dependency
+            # reliability issue, not a code bug, so the fix is redundancy, not
+            # a single "correct" URL. gl.nondet.web.get returns an object with
+            # .body (bytes) and .status (int), not a raw string.
+            last_error: Exception | None = None
+
+            try:
+                resp = gl.nondet.web.get("https://worldtimeapi.org/api/timezone/Etc/UTC")
+                data = json.loads(resp.body)
+                return int(data["unixtime"])
+            except Exception as exc:
+                last_error = exc
+
+            try:
+                # Cloudflare's edge trace endpoint — extremely high uptime,
+                # plaintext "ts=<unix seconds>.<fraction>" line.
+                resp = gl.nondet.web.get("https://1.1.1.1/cdn-cgi/trace")
+                text = resp.body.decode("utf-8") if isinstance(resp.body, (bytes, bytearray)) else str(resp.body)
+                for line in text.splitlines():
+                    if line.startswith("ts="):
+                        return int(float(line[len("ts="):]))
+                raise ValueError("no ts= line in Cloudflare trace response")
+            except Exception as exc:
+                last_error = exc
+
+            try:
+                resp = gl.nondet.web.get("https://timeapi.io/api/time/current/zone?timeZone=UTC")
+                data = json.loads(resp.body)
+                # timeapi.io returns broken-down fields, not a unix timestamp;
+                # reconstruct via the standard library rather than trusting a
+                # field name that may not exist across API versions.
+                import datetime as _dt
+
+                dt = _dt.datetime(
+                    int(data["year"]), int(data["month"]), int(data["day"]),
+                    int(data["hour"]), int(data["minute"]), int(data["seconds"]),
+                    tzinfo=_dt.timezone.utc,
+                )
+                return int(dt.timestamp())
+            except Exception as exc:
+                last_error = exc
+
+            raise gl.vm.UserError(f"all time sources unreachable: {last_error}")
 
         def validator_fn(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):

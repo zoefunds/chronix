@@ -47,6 +47,12 @@ export default function MarketDetail() {
   const [stakeStep, setStakeStep] = useState<'idle' | 'signing' | 'recording'>('idle')
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [evidenceUrl, setEvidenceUrl] = useState('')
+  const [evidenceSourceType, setEvidenceSourceType] = useState<'news' | 'academic' | 'government' | 'market' | 'social' | 'primary'>('news')
+  const [evidenceSummary, setEvidenceSummary] = useState('')
+  const [submittingEvidence, setSubmittingEvidence] = useState(false)
+  const [evidenceError, setEvidenceError] = useState<string | null>(null)
+  const [evidenceStep, setEvidenceStep] = useState<'idle' | 'signing' | 'recording'>('idle')
 
   useEffect(() => {
     if (!id) return
@@ -128,6 +134,52 @@ export default function MarketDetail() {
       setCancelError(err instanceof Error ? err.message : 'Cancel failed — the contract rejected this call.')
     } finally {
       setCancelling(false)
+    }
+  }
+
+  async function handleSubmitEvidence() {
+    if (!market) return
+    if (!wallet || !token) {
+      setEvidenceError('Connect and sign in with your wallet first.')
+      return
+    }
+    if (!market.contract_market_id) {
+      setEvidenceError('This market has no on-chain id yet.')
+      return
+    }
+    if (!evidenceUrl.trim()) {
+      setEvidenceError('Enter a URL.')
+      return
+    }
+    setEvidenceError(null)
+    setSubmittingEvidence(true)
+    try {
+      setEvidenceStep('signing')
+      // Only the URL + source type go on-chain — the contract's own settle()
+      // fetches and evaluates the page itself, it never trusts a submitter's
+      // summary as fact. The summary here is purely a local Postgres mirror
+      // field for the UI, not evidence the adjudication logic reads.
+      const txHash = await genlayer.submitEvidencePointer(
+        wallet as Address,
+        Number(market.contract_market_id),
+        evidenceSourceType,
+        evidenceUrl.trim()
+      )
+      setEvidenceStep('recording')
+      await api.submitEvidence(
+        market.id,
+        { sourceType: evidenceSourceType, url: evidenceUrl.trim(), summary: evidenceSummary.trim(), txHash },
+        token
+      )
+      const refreshed = await api.getMarketEvidence(market.id)
+      setEvidence(refreshed)
+      setEvidenceUrl('')
+      setEvidenceSummary('')
+    } catch (err) {
+      setEvidenceError(err instanceof Error ? err.message : 'Evidence submission failed.')
+    } finally {
+      setSubmittingEvidence(false)
+      setEvidenceStep('idle')
     }
   }
 
@@ -223,6 +275,52 @@ export default function MarketDetail() {
                 </div>
               ))}
             </div>
+
+            {(market.status === 'open' || market.status === 'awaiting_adjudication') && (
+              <div className="mt-4 pt-4 border-t border-outline-variant flex flex-col gap-2">
+                <Label>Submit evidence pointer</Label>
+                <p className="text-label-sm font-label text-on-surface-variant">
+                  Point the contract at a source. The contract fetches and evaluates the page itself during
+                  settlement — it never trusts any summary you attach as fact.
+                </p>
+                <div className="flex gap-2">
+                  <select
+                    value={evidenceSourceType}
+                    onChange={(e) => setEvidenceSourceType(e.target.value as typeof evidenceSourceType)}
+                    className="bg-surface border border-border-slate focus:border-secondary focus:ring-0 outline-none rounded px-2 py-2 text-body-sm"
+                  >
+                    <option value="news">news</option>
+                    <option value="academic">academic</option>
+                    <option value="government">government</option>
+                    <option value="market">market</option>
+                    <option value="social">social</option>
+                    <option value="primary">primary</option>
+                  </select>
+                  <input
+                    value={evidenceUrl}
+                    onChange={(e) => setEvidenceUrl(e.target.value)}
+                    type="url"
+                    placeholder="https://example.com/article"
+                    className="flex-1 bg-surface border border-border-slate focus:border-secondary focus:ring-0 outline-none rounded px-3 py-2 text-body-sm"
+                  />
+                </div>
+                <input
+                  value={evidenceSummary}
+                  onChange={(e) => setEvidenceSummary(e.target.value)}
+                  type="text"
+                  placeholder="Optional note for other users (not read by the contract)"
+                  className="bg-surface border border-border-slate focus:border-secondary focus:ring-0 outline-none rounded px-3 py-2 text-body-sm"
+                />
+                {evidenceError && <p className="text-label-sm font-label text-error">{evidenceError}</p>}
+                <Button variant="outline" disabled={submittingEvidence} onClick={handleSubmitEvidence}>
+                  {evidenceStep === 'signing'
+                    ? 'Confirm in wallet…'
+                    : evidenceStep === 'recording'
+                      ? 'Recording…'
+                      : 'Submit Evidence'}
+                </Button>
+              </div>
+            )}
           </Card>
 
           <Card className="p-4">

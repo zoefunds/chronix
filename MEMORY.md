@@ -56,10 +56,14 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 
 ## Deployment state
 
-- **Contract address**: **DEPLOYED** — `0xF0308C069Fb536D334926A01d2d625467fe77b0e` on
-  GenLayer Studio/StudioNet. Deployed successfully by the user after two contract fixes (see
-  gotchas below). Wired into `.env.example`, `backend/.env.example`, `backend/.env`,
-  `frontend/.env.example`, `frontend/.env`.
+- **Contract address**: **DEPLOYED (v2)** — `0xA37d6bFb02dDB3D5155Dc50E88e27751633bF8Dc` on
+  GenLayer Studio/StudioNet, deployed 2026-07-30. This SUPERSEDES the original address
+  `0xF0308C069Fb536D334926A01d2d625467fe77b0e`, which is dead — its first real transaction
+  (`create_market`) reverted with `AttributeError: module 'genlayer.gl' has no attribute
+  'get_webpage'` because the pinned runner had moved that API to `gl.nondet.web.*` (see
+  gotchas below). GenVM contracts are immutable, so this required a full redeploy under a new
+  address, not a patch. Wired into `.env.example`, `backend/.env.example`, `backend/.env`,
+  `frontend/.env.example`, `frontend/.env`, Fly secrets, and Vercel env vars.
 - **Contract header** (do not touch again): the file that actually deployed successfully uses
   `# v0.2.16` + `# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }`
   as the first two lines — this is the user's own edit, confirmed working. An earlier attempt
@@ -93,10 +97,8 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   reappears after a future deploy (Vercel may re-auto-assign a project default domain), just
   remove it again the same way — `chronix-app.vercel.app` is the only domain that should serve
   this app.
-- **Database**: production is Fly Postgres (`chronix-db`, single-node — NOT highly available;
-  an iad regional outage takes down the DB even though the app machines are split iad/lhr. Fine
-  for now, worth upgrading to a 3-node cluster before real usage volume — this is a cost/infra
-  decision, ask the user before provisioning more nodes). Migrations applied via
+- **Database**: production is Fly Postgres (`chronix-db`), now a 3-node HA cluster — 1 primary
+  (iad) + 2 replicas (iad, lhr), see Open TODOs below for exact machine IDs. Migrations applied via
   `fly ssh console -a chronix-backend -C "node dist/db/migrate.js"` after each deploy that adds
   one — currently 001-004 all applied. Local dev still uses `docker-compose.yml`.
 - **Keeper wallet funded (2026-07-30)**: user confirmed the keeper address
@@ -123,6 +125,17 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   transfer. Reversing this order (transfer-then-zero) is a reentrancy/double-spend bug class;
   every payout path must follow the same order and guard against `amount <= 0` at entry so a
   replayed call after zeroing reverts cleanly instead of silently doing nothing.
+- **`gl.get_webpage`/`gl.exec_prompt` don't exist on the pinned runner (fixed 2026-07-30,
+  redeployed as v2 above)**: the GenLayer SDK moved these to `gl.nondet.web.render(url,
+  mode="text"|"html"|"screenshot")` (page rendering) / `gl.nondet.web.get(url)` (plain HTTP,
+  returns an object with `.body` bytes + `.status`, NOT a string) / `gl.nondet.exec_prompt(...)`
+  at some point after the docs snapshot this contract was originally written against. This only
+  surfaced when a REAL transaction hit the runner (`create_market`, since `_now()` calls
+  `fetch_epoch_seconds` on every write) — static analysis, `py_compile`, and `ast.parse` all
+  passed fine because it's a plain Python `AttributeError` inside a nondet block, not a syntax
+  error. **Lesson: don't trust a docs-snapshot API surface for `gl.*` calls without a real
+  transaction confirming it; if another `gl.*` AttributeError shows up in a future tx trace,
+  check `sdk.genlayer.com`'s CURRENT (not cached) API reference or the changelog first.**
 - **Dockerfile build-context bug (fixed 2026-07-30)**: `backend/Dockerfile` needs the REPO ROOT
   as build context (so it can `COPY database ./database`), but flyctl resolves `[build]
   dockerfile = "..."` in `fly.toml` **relative to the config file's own directory**, not the
