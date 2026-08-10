@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Button, Card, EvidenceChip, HorizonBadge, Label, StatusChip } from '../components/ui'
-import { api } from '../lib/api'
+import { api, ApiError } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { genlayer } from '../lib/genlayer'
 import { formatGen, weiToGen } from '../lib/format'
@@ -34,7 +34,7 @@ function currentStageIndex(status: string) {
 export default function MarketDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { wallet, token } = useAuth()
+  const { wallet, token, clearSession } = useAuth()
 
   const [market, setMarket] = useState<Market | null>(null)
   const [evidence, setEvidence] = useState<Evidence[]>([])
@@ -53,6 +53,40 @@ export default function MarketDetail() {
   const [submittingEvidence, setSubmittingEvidence] = useState(false)
   const [evidenceError, setEvidenceError] = useState<string | null>(null)
   const [evidenceStep, setEvidenceStep] = useState<'idle' | 'signing' | 'recording'>('idle')
+  // Set once submit_evidence_pointer lands on-chain. If the follow-up POST
+  // (mirroring into Postgres) then fails — commonly GenLayer's 30 req/min
+  // RPC cap tripping mid-poll — we must not let the user resubmit on-chain.
+  // Keep the confirmed tx around so "Retry recording" just retries the
+  // mirror call.
+  const [pendingEvidence, setPendingEvidence] = useState<{
+    txHash: string
+    sourceType: typeof evidenceSourceType
+    url: string
+    summary: string
+  } | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+
+  async function handleResync() {
+    if (!id) return
+    setSyncing(true)
+    setSyncMessage(null)
+    try {
+      const result = await api.sync()
+      setSyncMessage(
+        result.evidenceBackfilled > 0 || result.updated > 0 || result.discovered > 0
+          ? `Synced: ${result.evidenceBackfilled} evidence pointer(s) backfilled.`
+          : 'Already up to date with chain.'
+      )
+      const [m, e] = await Promise.all([api.getMarket(id), api.getMarketEvidence(id)])
+      setMarket(m)
+      setEvidence(e)
+    } catch (err) {
+      setSyncMessage(err instanceof Error ? err.message : 'Resync failed.')
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   useEffect(() => {
     if (!id) return
@@ -137,8 +171,67 @@ export default function MarketDetail() {
     }
   }
 
+  async function recordEvidence(pending: {
+    txHash: string
+    sourceType: typeof evidenceSourceType
+    url: string
+    summary: string
+  }) {
+    if (!market) return
+    if (!token) {
+      setPendingEvidence(pending)
+      setEvidenceError(
+        'Your session expired while the transaction was confirming on-chain. Sign in again, then press "Retry recording" — the evidence is already live on-chain and will not be submitted twice.'
+      )
+      return
+    }
+    setEvidenceStep('recording')
+    try {
+      await api.submitEvidence(
+        market.id,
+        { sourceType: pending.sourceType, url: pending.url, summary: pending.summary, txHash: pending.txHash },
+        token
+      )
+      setPendingEvidence(null)
+      const refreshed = await api.getMarketEvidence(market.id)
+      setEvidence(refreshed)
+      setEvidenceUrl('')
+      setEvidenceSummary('')
+    } catch (err) {
+      // The on-chain write already succeeded — never treat this as "failed"
+      // in a way that would invite a second, paid resubmission. The backend
+      // chain indexer also backfills missing evidence on its own within
+      // ~15s even if the user never retries.
+      setPendingEvidence(pending)
+      if (err instanceof ApiError && err.status === 401) {
+        clearSession()
+        setEvidenceError(
+          'Your session expired, so this evidence could not be saved to Chronix\'s index (it is still live on-chain). Sign in again, then press "Retry recording".'
+        )
+      } else if (err instanceof ApiError && err.status === 429) {
+        setEvidenceError(
+          'GenLayer\'s request rate limit was hit while recording this evidence (it is still live on-chain). Wait a minute and press "Retry recording", or it will appear automatically.'
+        )
+      } else {
+        setEvidenceError(
+          `Your evidence is live on-chain, but saving it to Chronix's index failed: ${
+            err instanceof Error ? err.message : 'unknown error'
+          }. It will appear automatically within a minute, or press "Retry recording".`
+        )
+      }
+    } finally {
+      setEvidenceStep('idle')
+    }
+  }
+
   async function handleSubmitEvidence() {
     if (!market) return
+    if (pendingEvidence) {
+      setSubmittingEvidence(true)
+      await recordEvidence(pendingEvidence)
+      setSubmittingEvidence(false)
+      return
+    }
     if (!wallet || !token) {
       setEvidenceError('Connect and sign in with your wallet first.')
       return
@@ -165,16 +258,12 @@ export default function MarketDetail() {
         evidenceSourceType,
         evidenceUrl.trim()
       )
-      setEvidenceStep('recording')
-      await api.submitEvidence(
-        market.id,
-        { sourceType: evidenceSourceType, url: evidenceUrl.trim(), summary: evidenceSummary.trim(), txHash },
-        token
-      )
-      const refreshed = await api.getMarketEvidence(market.id)
-      setEvidence(refreshed)
-      setEvidenceUrl('')
-      setEvidenceSummary('')
+      await recordEvidence({
+        txHash,
+        sourceType: evidenceSourceType,
+        url: evidenceUrl.trim(),
+        summary: evidenceSummary.trim(),
+      })
     } catch (err) {
       setEvidenceError(err instanceof Error ? err.message : 'Evidence submission failed.')
     } finally {
@@ -254,8 +343,16 @@ export default function MarketDetail() {
           <Card className="p-4">
             <div className="flex items-center justify-between mb-3">
               <Label>Evidence feed</Label>
-              <span className="font-label text-label-sm text-on-surface-variant">{evidence.length} items</span>
+              <div className="flex items-center gap-3">
+                <span className="font-label text-label-sm text-on-surface-variant">{evidence.length} items</span>
+                <Button variant="outline" onClick={handleResync} disabled={syncing}>
+                  {syncing ? 'Syncing…' : 'Resync from chain'}
+                </Button>
+              </div>
             </div>
+            {syncMessage && (
+              <p className="text-label-sm font-label text-on-surface-variant mb-2">{syncMessage}</p>
+            )}
             <div className="flex flex-col gap-2">
               {evidence.length === 0 && (
                 <p className="text-body-sm text-on-surface-variant">No evidence submitted yet.</p>
@@ -317,7 +414,9 @@ export default function MarketDetail() {
                     ? 'Confirm in wallet…'
                     : evidenceStep === 'recording'
                       ? 'Recording…'
-                      : 'Submit Evidence'}
+                      : pendingEvidence
+                        ? 'Retry recording'
+                        : 'Submit Evidence'}
                 </Button>
               </div>
             )}

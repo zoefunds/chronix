@@ -1,25 +1,42 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Card, EvidenceChip } from '../components/ui'
+import { Button, Card, EvidenceChip } from '../components/ui'
 import { api } from '../lib/api'
 import type { EvidenceWithMarket } from '../types'
 
 const sourceTypes = ['all', 'news', 'academic', 'government', 'market', 'social', 'primary'] as const
+const PAGE_SIZE = 25
 
 export default function EvidenceLedger() {
   const [filter, setFilter] = useState<(typeof sourceTypes)[number]>('all')
+  const [page, setPage] = useState(0)
   const [items, setItems] = useState<EvidenceWithMarket[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Changing the filter always resets back to page 0 — a stale offset into
+  // a differently-sized filtered result would otherwise show a "page" that
+  // doesn't line up with what's actually in it.
+  useEffect(() => {
+    setPage(0)
+  }, [filter])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
     api
-      .listAllEvidence(filter === 'all' ? {} : { sourceType: filter })
-      .then((rows) => {
-        if (!cancelled) setItems(rows)
+      .listAllEvidence({
+        ...(filter === 'all' ? {} : { sourceType: filter }),
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      })
+      .then((res) => {
+        if (!cancelled) {
+          setItems(res.evidence)
+          setTotal(res.total)
+        }
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load evidence.')
@@ -30,7 +47,9 @@ export default function EvidenceLedger() {
     return () => {
       cancelled = true
     }
-  }, [filter])
+  }, [filter, page])
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <div className="flex flex-col gap-6">
@@ -98,6 +117,25 @@ export default function EvidenceLedger() {
             <div className="p-8 text-center text-body-sm text-on-surface-variant">No evidence of this type yet.</div>
           )}
         </Card>
+      )}
+
+      {!loading && !error && total > 0 && (
+        <div className="flex items-center justify-between">
+          <span className="font-label text-label-sm text-on-surface-variant">
+            {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+              Previous
+            </Button>
+            <span className="font-label text-label-sm text-on-surface-variant">
+              Page {page + 1} of {pageCount}
+            </span>
+            <Button variant="outline" disabled={page + 1 >= pageCount} onClick={() => setPage((p) => p + 1)}>
+              Next
+            </Button>
+          </div>
+        </div>
       )}
     </div>
   )

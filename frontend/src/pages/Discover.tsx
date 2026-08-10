@@ -29,8 +29,10 @@ export default function Discover() {
   const [markets, setMarkets] = useState<Market[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
 
-  useEffect(() => {
+  function loadMarkets() {
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -52,7 +54,30 @@ export default function Discover() {
     return () => {
       cancelled = true
     }
-  }, [category, horizon, status])
+  }
+
+  useEffect(loadMarkets, [category, horizon, status])
+
+  // Manual trigger for the same reconciliation the backend's chain indexer
+  // already runs on a 15s interval — for when a market or evidence pointer
+  // confirmed on-chain hasn't shown up yet and you don't want to wait.
+  async function handleResync() {
+    setSyncing(true)
+    setSyncMessage(null)
+    try {
+      const result = await api.sync()
+      setSyncMessage(
+        result.discovered > 0 || result.evidenceBackfilled > 0 || result.updated > 0
+          ? `Synced: ${result.discovered} market(s) and ${result.evidenceBackfilled} evidence pointer(s) backfilled, ${result.updated} status update(s).`
+          : 'Already up to date with chain.'
+      )
+      loadMarkets()
+    } catch (err) {
+      setSyncMessage(err instanceof Error ? err.message : 'Resync failed.')
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   const filtered = markets.filter(
     (m) => !search || m.question.toLowerCase().includes(search.toLowerCase())
@@ -146,10 +171,17 @@ export default function Discover() {
       <div className="flex-1 flex flex-col gap-6">
         <div className="flex items-center justify-between">
           <h1 className="font-headline text-headline-lg text-primary">Market Discovery</h1>
-          <Button variant="secondary" onClick={() => navigate('/create')}>
-            + New Market
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={handleResync} disabled={syncing}>
+              {syncing ? 'Syncing…' : 'Resync from chain'}
+            </Button>
+            <Button variant="secondary" onClick={() => navigate('/create')}>
+              + New Market
+            </Button>
+          </div>
         </div>
+
+        {syncMessage && <p className="text-label-sm font-label text-on-surface-variant">{syncMessage}</p>}
 
         {error && (
           <Card className="p-4 text-body-sm text-error">

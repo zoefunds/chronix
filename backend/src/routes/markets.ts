@@ -22,6 +22,7 @@ import { withTransaction } from "../db/pool.js";
 import { cacheGetOrSet } from "../lib/cache.js";
 import { env } from "../config.js";
 import { genlayerClient } from "../genlayer/client.js";
+import { runChainIndexerOnce } from "../jobs/chainIndexer.js";
 
 export async function marketsRoutes(fastify: FastifyInstance) {
   // GET /evidence — global feed across every market, newest first. Powers
@@ -33,6 +34,25 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     const { rows, total } = await listAllEvidence({ sourceType: q.sourceType, limit, offset });
     return reply.send({ evidence: rows, total, limit, offset });
   });
+
+  // POST /sync — on-demand version of the chain indexer's background pass:
+  // re-reads chain state for every active market, backfills any market or
+  // evidence pointer that's confirmed on-chain but missing from Postgres
+  // (mirror-POST failures — expired session, GenLayer's RPC rate limit
+  // tripping mid-poll, a closed tab), and reconciles status/financials.
+  // Rate-limited well below GenLayer's 30 req/min cap, since one run can
+  // itself issue a handful of chain reads — this button is "resync now",
+  // not a replacement for the interval job, which keeps running regardless.
+  fastify.post(
+    "/sync",
+    // fastify-rate-limit's default store is per-machine, and this app runs 2
+    // machines, so keep this conservative: worst case is roughly double.
+    { config: { rateLimit: { max: 2, timeWindow: "1 minute" } } },
+    async (_request, reply) => {
+      const result = await runChainIndexerOnce();
+      return reply.send(result);
+    }
+  );
 
   // GET /markets — list + filter by horizon/category/status
   fastify.get("/markets", async (request, reply) => {

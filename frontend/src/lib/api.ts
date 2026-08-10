@@ -24,7 +24,10 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // Only set Content-Type when there's actually a body — Fastify's JSON
+      // parser rejects an empty body sent with 'application/json' (this bit
+      // POST /sync, which takes no body).
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
@@ -120,12 +123,15 @@ export const api = {
     return res.position
   },
 
-  /** GET /evidence — global feed across every market. */
-  async listAllEvidence(filters: { sourceType?: string } = {}) {
-    const res = await request<{ evidence: EvidenceWithMarket[]; total: number }>(
-      `/evidence${toQuery(filters)}`
+  /** GET /evidence — global feed across every market, paginated (backend caps limit at 200). */
+  async listAllEvidence(filters: { sourceType?: string; limit?: number; offset?: number } = {}) {
+    return request<{ evidence: EvidenceWithMarket[]; total: number; limit: number; offset: number }>(
+      `/evidence${toQuery({
+        sourceType: filters.sourceType,
+        limit: filters.limit !== undefined ? String(filters.limit) : undefined,
+        offset: filters.offset !== undefined ? String(filters.offset) : undefined,
+      })}`
     )
-    return res.evidence
   },
 
   /** GET /markets/:id/evidence */
@@ -179,6 +185,18 @@ export const api = {
 
   /** GET /health */
   health: () => request<{ status: string }>('/health'),
+
+  /**
+   * POST /sync — on-demand chain resync: re-reads every active market from
+   * GenLayer directly and backfills anything confirmed on-chain but missing
+   * from Chronix's index (a mirror-POST that failed after the on-chain
+   * write already succeeded). Rate-limited server-side; safe to expose as a
+   * user-facing button.
+   */
+  sync: () =>
+    request<{ checked: number; updated: number; discovered: number; evidenceBackfilled: number }>('/sync', {
+      method: 'POST',
+    }),
 
   // --- Auth: SIWE nonce + verify (backend endpoints per PLANNING.md auth flow) ---
   getNonce: (wallet: string) =>

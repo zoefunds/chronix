@@ -14,6 +14,12 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   signIn: () => Promise<void>
   signOut: () => void
+  /**
+   * Drops a stale session token (rejected by the backend as expired/invalid)
+   * without disconnecting the wallet itself, so the user only has to
+   * re-sign a SIWE message, not reconnect their wallet from scratch.
+   */
+  clearSession: () => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -81,7 +87,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     disconnect()
   }, [disconnect])
 
-  const value = useMemo(() => ({ ...state, signIn, signOut }), [state, signIn, signOut])
+  const clearSession = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEY)
+    setState((s) => ({ ...s, token: null, status: 'idle', error: null }))
+  }, [])
+
+  const value = useMemo(
+    () => ({ ...state, signIn, signOut, clearSession }),
+    [state, signIn, signOut, clearSession]
+  )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

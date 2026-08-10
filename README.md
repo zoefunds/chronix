@@ -52,7 +52,7 @@ All money movement funnels through a single `_send_gen` chokepoint in the contra
 - **Backend**: Node.js + Fastify + Postgres. Acts as a read cache / indexer over chain state, handles SIWE-based session auth, and runs background jobs:
   - **Deadline enforcer** (60s cron) — flips a market's status to `awaiting_adjudication` only when wall-clock time *and* an on-chain deadline check both agree.
   - **Chain-write reconciler** — retries `chain_sync_queue` entries with backoff; a Postgres row is only marked `confirmed` after a real transaction receipt confirms it.
-  - **Chain indexer** — periodically re-reads on-chain market state and reconciles Postgres to match chain truth, independent of who triggered the transition.
+  - **Chain indexer** — periodically (every `CHAIN_RECONCILER_INTERVAL_MS`, default 15s) re-reads on-chain market state and reconciles Postgres to match chain truth, independent of who triggered the transition. It also **discovers and backfills** markets and evidence pointers that exist on-chain but were never mirrored into Postgres — e.g. a wallet's `create_market`/`submit_evidence_pointer` confirmed on-chain, but the browser's follow-up `POST /markets` or `POST /markets/:id/evidence` failed (expired session token, GenLayer's request-rate limit, a closed tab). Without this, such a market/evidence pointer would be permanently invisible in the UI despite being real on-chain. Triggerable on demand via `POST /sync` (see [API overview](#api-overview)) instead of waiting for the next interval tick.
   - **Keeper** (optional) — a narrow automation key that calls only the non-payable, fully-permissionless `request_adjudication`/`settle` methods. Any wallet could call the same methods with the same effect; the keeper just automates it.
 - **Contract**: a single GenLayer Intelligent Contract (`contracts/chronix.py`), Python, deployed manually to GenLayer Studio/StudioNet. GenVM contracts are immutable — any code change requires a new deployment address.
 - **Database**: PostgreSQL — a read mirror/cache of chain state plus app-level metadata (evidence pointers, market questions/categories), never the source of truth for money.
@@ -186,6 +186,8 @@ Core tables:
 - `evidence` — submitted evidence pointers (URL + summary), used only as leads — the contract re-fetches independently at settlement
 - `chain_sync_queue` — retry queue so a failed chain write is retried with backoff instead of silently dropped
 
+`markets.contract_market_id` and `evidence.(market_id, url)` both carry unique indexes (migrations `005`, `006`) — required so the chain indexer's discovery/backfill pass (see [Architecture](#architecture)) can safely run concurrently across both backend machines without inserting duplicate rows.
+
 Run migrations:
 
 ```bash
@@ -292,6 +294,7 @@ For full deployment history, past incidents, and hard-won gotchas (Dockerfile bu
 - **Adjudication never trusts user-submitted text.** `submit_evidence_pointer` only stores a URL; `settle` independently re-fetches from ≥3 real source categories and reaches consensus via GenVM's nondeterministic-block equivalence principle.
 - **Escrow ordering** is strictly read-ledger → zero-ledger → persist → transfer, funneled through a single `_send_gen` chokepoint, to prevent reentrancy/double-spend.
 - **A Postgres row is only marked `confirmed`** after a real on-chain transaction receipt confirms it — the DB is a read cache, never a source of truth for money.
+- **The frontend never resubmits a wallet-signed write to paper over a mirror failure.** If a market/stake/evidence tx confirms on-chain but the follow-up `POST` to Postgres fails (expired session, rate limit, network blip), the UI holds onto the confirmed `txHash` and offers "Retry recording" rather than re-running the on-chain call — a second on-chain submission would mean actually paying/staking twice. The chain indexer's backfill pass is the real safety net: it independently discovers and mirrors anything confirmed on-chain that Postgres is missing, with or without a retry.
 
 ## API overview
 
@@ -303,11 +306,14 @@ Base URL: `http://localhost:8080` (dev) or `https://chronix-backend.fly.dev` (pr
 | `/auth/nonce` | POST | issue a SIWE nonce |
 | `/auth/verify` | POST | verify a signed SIWE message, issue a session |
 | `/markets` | GET | list markets |
+| `/markets` | POST | mirror an already-confirmed `create_market` tx into Postgres (requires `txHash`/`contractMarketId`) |
 | `/markets/:id` | GET | market detail |
 | `/markets/:id/positions` | POST | record a stake already confirmed on-chain (requires `txHash`/`contractMarketId`) |
-| `/markets/:id/evidence` | GET/POST | evidence pointers for a market |
+| `/markets/:id/evidence` | GET/POST | evidence pointers for a market — `GET` paginated (`limit`, default 50/max 200; `offset`) |
 | `/markets/:id/events` | GET | market event timeline (from `market_events`) |
 | `/markets/:id/trace` | GET | GenVM execution trace for a market's `settle()` tx, when available |
+| `/evidence` | GET | global evidence feed across all markets, paginated (`sourceType`, `limit`, `offset`) |
+| `/sync` | POST | on-demand chain resync — runs the chain indexer's reconcile + discover/backfill pass immediately instead of waiting for the next interval tick. Rate-limited (2/min per machine) since it costs GenLayer RPC calls; safe to expose as a user-facing "Resync from chain" button (see Discover / MarketDetail pages) |
 | `/portfolio/:wallet` | GET | a wallet's positions, joined with market status |
 
 All write routes require proof of an already-confirmed on-chain transaction — the backend does not originate money-moving writes.
@@ -319,4 +325,6 @@ All write routes require proof of an already-confirmed on-chain transaction — 
 - **Wallet won't connect / wrong network** — the app targets GenLayer StudioNet (chain id `61999`), not Ethereum mainnet/Sepolia; make sure `VITE_WALLETCONNECT_PROJECT_ID` is set and the wallet is pointed at StudioNet.
 - **Migrations fail locally** — confirm Postgres is up (`docker compose up postgres`) and `DATABASE_URL` in `backend/.env` matches the compose service (`postgres://chronix:chronix@localhost:5432/chronix` when running via Docker).
 - **Keeper not settling markets automatically** — `GENLAYER_KEEPER_PRIVATE_KEY` is unset (settlement still works, any wallet can call `request_adjudication`/`settle` manually), or the keeper wallet is out of GEN gas.
+- **A market or evidence pointer I just submitted isn't showing up** — the on-chain write almost certainly succeeded (check the tx hash on the GenLayer explorer); what failed is the mirror step into Postgres. Common causes: your session token is >24h old (`JWT_EXPIRES_IN`) and the frontend hadn't noticed yet — it now detects this on a 401 and prompts you to sign in again without resubmitting on-chain; or GenLayer Studio's request-rate limit (30 req/min) tripped while an earlier transaction's receipt was still being polled. Either way, press "Resync from chain" (Discover page, or the Evidence feed on a market page) to trigger `POST /sync` immediately, or just wait — the chain indexer's background pass picks it up within `CHAIN_RECONCILER_INTERVAL_MS` (15s) regardless.
+- **401 `"Missing or invalid session token"` on a write** — session JWTs expire after `JWT_EXPIRES_IN` (24h default), but the frontend used to treat "a token exists in `localStorage`" as permanently authenticated with no client-side expiry check, so this could surface deep into a multi-step flow (e.g. after an on-chain tx already confirmed). Fixed: any 401 now clears the stale session (`clearSession()` in `frontend/src/lib/auth.tsx`, which drops the token without disconnecting the wallet) and prompts a re-sign-in; in-flight on-chain results are preserved for retry, never resubmitted.
 - **Deploy issues** — see [`MEMORY.md`](MEMORY.md) for a running log of past deployment incidents and fixes (Dockerfile build context, Vercel alias/SSO protection, migration path resolution, contract API renames).

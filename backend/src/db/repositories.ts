@@ -166,6 +166,60 @@ export async function syncMarketFromChain(
   );
 }
 
+/** Every contract_market_id already mirrored into Postgres, known or not still active. */
+export async function findKnownContractMarketIds(): Promise<Set<number>> {
+  const res = await query<{ contract_market_id: string }>(
+    `SELECT contract_market_id FROM markets WHERE contract_market_id IS NOT NULL`
+  );
+  return new Set(res.rows.map((r) => Number(r.contract_market_id)));
+}
+
+/**
+ * Inserts a market discovered directly on-chain that never made it into
+ * Postgres via POST /markets (e.g. the browser's mirror call failed after
+ * the user's wallet already confirmed create_market on-chain). Unlike
+ * insertMarket, this trusts chain state for status/financials too, since
+ * there was no prior DB row to reconcile against.
+ */
+export async function insertMarketFromChain(params: {
+  contractMarketId: number;
+  question: string;
+  category: string;
+  horizonYears: number;
+  resolutionCriteria: string;
+  createdBy: string;
+  resolvesAt: string;
+  status: MarketStatus;
+  verdict?: string;
+  poolDepositedWei: string;
+  totalYesWei: string;
+  totalNoWei: string;
+}): Promise<MarketRow> {
+  const res = await query<MarketRow>(
+    `INSERT INTO markets
+       (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at,
+        contract_market_id, verdict, pool_deposited_wei, total_yes_wei, total_no_wei)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     ON CONFLICT (contract_market_id) WHERE contract_market_id IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [
+      params.question,
+      params.category,
+      params.horizonYears,
+      params.resolutionCriteria,
+      params.createdBy,
+      params.status,
+      params.resolvesAt,
+      String(params.contractMarketId),
+      params.verdict ?? null,
+      params.poolDepositedWei,
+      params.totalYesWei,
+      params.totalNoWei,
+    ]
+  );
+  return res.rows[0];
+}
+
 /** Markets that have an on-chain id and are still in a mutable lifecycle state. */
 export async function findActiveChainMarkets(): Promise<MarketRow[]> {
   const res = await query<MarketRow>(
@@ -411,6 +465,36 @@ export async function insertEvidence(params: {
      VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
     [params.marketId, params.sourceType, params.url, params.summary, params.submittedBy]
+  );
+  return res.rows[0];
+}
+
+/** Every (market_id, url) pair already mirrored, for one market — used to diff against chain state. */
+export async function findKnownEvidenceUrls(marketId: string): Promise<Set<string>> {
+  const res = await query<{ url: string }>(`SELECT url FROM evidence WHERE market_id = $1`, [marketId]);
+  return new Set(res.rows.map((r) => r.url));
+}
+
+/**
+ * Inserts an evidence pointer discovered directly on-chain that never made
+ * it into Postgres via POST /markets/:id/evidence (the browser's mirror
+ * call failed after the wallet already confirmed submit_evidence_pointer
+ * on-chain — e.g. GenLayer RPC rate-limited the receipt poll). No summary
+ * is available from chain (it's a UI-only field, never trusted by
+ * adjudication), so it's left null.
+ */
+export async function insertEvidenceFromChain(params: {
+  marketId: string;
+  sourceType: string;
+  url: string;
+  submittedBy: string;
+}): Promise<EvidenceRow | undefined> {
+  const res = await query<EvidenceRow>(
+    `INSERT INTO evidence (market_id, source_type, url, summary, submitted_by)
+     VALUES ($1, $2, $3, NULL, $4)
+     ON CONFLICT (market_id, url) DO NOTHING
+     RETURNING *`,
+    [params.marketId, params.sourceType, params.url, params.submittedBy]
   );
   return res.rows[0];
 }

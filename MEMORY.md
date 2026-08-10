@@ -107,7 +107,7 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 - **Database**: production is Fly Postgres (`chronix-db`), now a 3-node HA cluster — 1 primary
   (iad) + 2 replicas (iad, lhr), see Open TODOs below for exact machine IDs. Migrations applied via
   `fly ssh console -a chronix-backend -C "node dist/db/migrate.js"` after each deploy that adds
-  one — currently 001-004 all applied. Local dev still uses `docker-compose.yml`.
+  one — currently 001-006 all applied. Local dev still uses `docker-compose.yml`.
 - **Keeper wallet funded (2026-07-30)**: user confirmed the keeper address
   (`0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`) already has enough GEN on GenLayer Studio's
   network — no further faucet action needed. `request_adjudication`/`settle` should now run
@@ -115,6 +115,57 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 - **WalletConnect project ID set (2026-07-30)**: `2825f1eeba8dfe044c9850190dd35d6b`, in
   `frontend/.env` and as a Vercel production env var (`VITE_WALLETCONNECT_PROJECT_ID`). This is
   a public client identifier, not a secret — fine to be in the bundled JS.
+- **Chain-indexer discovery/backfill + resync button (2026-08-10)**: the chain indexer used to
+  only reconcile markets already present in Postgres (`findActiveChainMarkets`), so a market or
+  evidence pointer whose mirror `POST` failed AFTER the on-chain write already succeeded was
+  permanently invisible — nothing ever looked for it. Root-caused two real incidents this
+  session: (1) a market created on-chain never showed up because the user's session JWT had
+  quietly expired (24h TTL, `AuthProvider` trusted `localStorage` forever with no client-side
+  expiry check) and the mirror `POST /markets` 401'd; (2) several evidence pointers submitted
+  back-to-back only showed one, because each submission's own `waitForTransactionReceipt` poll
+  loop (every 3s) pushed cumulative request volume over GenLayer Studio's 30 req/min RPC cap,
+  so later polls threw before their mirror `POST` was even attempted. Fixed with several pieces,
+  all deployed and verified against production:
+  - `backend/src/jobs/chainIndexer.ts` — added `discoverNewMarkets()` (walks
+    `get_market_count()` against known `contract_market_id`s, backfills gaps) and
+    `backfillEvidence()` (per active market, compares chain's free `evidenceCount` against what's
+    mirrored, only pays for `get_all_evidence()` when they differ). Both upsert the on-chain
+    creator/submitter into `users` first — chain returns a checksummed (mixed-case) address but
+    `users.wallet_address` / the FK expect the lowercased form used by SIWE sign-in, and this
+    mismatch caused a live FK-violation failure the first time discovery ran in production
+    (caught via `fly logs`, fixed by lowercasing + `upsertUser` before insert).
+  - `database/migrations/005_market_contract_id_unique.sql` /
+    `006_evidence_unique_url.sql` — unique indexes on `markets.contract_market_id` and
+    `evidence(market_id, url)` so `ON CONFLICT DO NOTHING` backfill inserts are race-safe across
+    the app's 2 Fly machines running the indexer independently. Both applied to `chronix-db`.
+  - `POST /sync` (new route, `backend/src/routes/markets.ts`) — runs the same reconcile +
+    discover/backfill pass on demand instead of waiting for the next 15s tick, rate-limited to
+    2/min per machine (RPC-cost guard). Wired to a "Resync from chain" button on Discover and
+    MarketDetail (`frontend/src/lib/api.ts`'s `sync()`). **Gotcha**: `api.ts`'s shared `request()`
+    always set `Content-Type: application/json` even for bodyless calls, and Fastify's JSON
+    parser rejects an empty body sent with that header — broke the button on first deploy
+    (`"Body cannot be empty when content-type is set to 'application/json'"`), fixed by only
+    setting the header when `init.body` is present.
+  - `frontend/src/lib/genlayer.ts` — receipt-poll interval widened 3s→5s, retries 20→15, to keep
+    a single submission's own polling well under the 30 req/min cap.
+  - `frontend/src/pages/CreateMarket.tsx` / `MarketDetail.tsx` — a confirmed on-chain write
+    (`txHash`/`contractMarketId`) is now held in state if the mirror `POST` fails, with a "Retry
+    recording" button, instead of being discarded — resubmitting on-chain to "fix" a mirror
+    failure would mean actually paying/staking twice. A 401 specifically triggers
+    `clearSession()` (`frontend/src/lib/auth.tsx`, new — drops the stale token without
+    disconnecting the wallet) rather than showing a raw JSON error.
+  - `frontend/src/pages/EvidenceLedger.tsx` — paginated (25/page, using the backend's existing
+    `limit`/`offset` support on `GET /evidence`), since an unpaged global feed gets messy as
+    evidence volume grows. Resets to page 0 on filter change.
+  - **Deploy note**: applying a new numbered migration against `chronix-db` non-interactively
+    via `fly postgres connect -a chronix-db < file.sql` reliably HANGS when piped through
+    another pipe stage (e.g. `| tail -30`) or when a prior `fly postgres connect` process from an
+    *unrelated* session is still alive in the background — kill stray `fly postgres connect`
+    processes first (`ps aux | grep "postgres connect"`) if a migration run seems stuck. Also:
+    reading Postgres credentials directly (`fly ssh console -a chronix-db -C "cat ...pgpass"` or
+    similar) is blocked by the sandbox's auto-mode classifier even with explicit user chat
+    approval — don't try to work around it; `fly postgres connect` itself (which never surfaces
+    the password) is the sanctioned path.
 
 ## Known gotchas / hard-won lessons
 

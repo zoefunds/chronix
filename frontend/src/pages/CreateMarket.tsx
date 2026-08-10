@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Label } from '../components/ui'
 import { useAuth } from '../lib/auth'
-import { api } from '../lib/api'
+import { api, ApiError } from '../lib/api'
 import { genlayer } from '../lib/genlayer'
 import type { Address } from 'genlayer-js/types'
 import type { CreateMarketPayload, EvidenceSourceType, Horizon, MarketCategory } from '../types'
@@ -13,7 +13,7 @@ const evidenceSourceOptions: EvidenceSourceType[] = ['news', 'academic', 'govern
 
 export default function CreateMarket() {
   const navigate = useNavigate()
-  const { wallet, token } = useAuth()
+  const { wallet, token, clearSession } = useAuth()
   const [form, setForm] = useState<CreateMarketPayload>({
     question: '',
     category: 'technology',
@@ -26,6 +26,16 @@ export default function CreateMarket() {
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'idle' | 'signing' | 'recording'>('idle')
+  // Set once create_market lands on-chain. If the follow-up POST /markets
+  // (mirroring into Postgres) then fails, we must NOT let the user hit
+  // "Create Market" again — that would sign and pay for a second on-chain
+  // market. Instead we keep this around so "Retry recording" can just
+  // retry the mirror call against the already-confirmed transaction.
+  const [onChainResult, setOnChainResult] = useState<{
+    txHash: string
+    contractMarketId: number
+    resolvesAt: string
+  } | null>(null)
 
   function toggleSource(s: EvidenceSourceType) {
     setForm((f) => ({
@@ -36,8 +46,67 @@ export default function CreateMarket() {
     }))
   }
 
+  async function recordOnChainResult(result: { txHash: string; contractMarketId: number; resolvesAt: string }) {
+    if (!token) {
+      setError(
+        'Your session expired while the transaction was confirming on-chain. Sign in again, then press "Retry recording" — the market is already live on-chain and will not be created twice.'
+      )
+      setOnChainResult(result)
+      return
+    }
+    setStep('recording')
+    try {
+      await api.createMarket(
+        {
+          question: form.question,
+          category: form.category,
+          horizonYears: form.horizonYears,
+          resolutionCriteria: form.resolutionCriteria,
+          allowedEvidenceSources: form.allowedEvidenceSources,
+          initialLiquidity: form.initialLiquidity,
+        },
+        { contractMarketId: String(result.contractMarketId), txHash: result.txHash, resolvesAt: result.resolvesAt },
+        token
+      )
+      setOnChainResult(null)
+      setSubmitted(true)
+      setTimeout(() => navigate('/discover'), 900)
+    } catch (err) {
+      // The on-chain write already succeeded — never treat this as "failed
+      // to create market" (that would invite a second, paid resubmission).
+      // A background chain-indexer pass on the backend will also pick this
+      // market up on its own within ~15s even if the user never retries.
+      setOnChainResult(result)
+      if (err instanceof ApiError && err.status === 401) {
+        // The stored session token is stale (expired, or invalidated by a
+        // backend redeploy) but the AuthProvider has no way to detect that
+        // client-side — it just trusts whatever is in localStorage. Clear it
+        // now so the UI stops claiming the wallet is signed in and the user
+        // can re-sign without losing the on-chain result above.
+        clearSession()
+        setError(
+          'Your session expired, so this market could not be saved to Chronix\'s index (it is still live on-chain). Sign in again, then press "Retry recording".'
+        )
+      } else {
+        setError(
+          `Your market is live on-chain, but saving it to Chronix's index failed: ${
+            err instanceof Error ? err.message : 'unknown error'
+          }. It will appear automatically within a minute, or press "Retry recording".`
+        )
+      }
+    } finally {
+      setStep('idle')
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (onChainResult) {
+      setSubmitting(true)
+      await recordOnChainResult(onChainResult)
+      setSubmitting(false)
+      return
+    }
     if (!wallet || !token) {
       setError('Connect and sign in with your wallet first.')
       return
@@ -65,22 +134,7 @@ export default function CreateMarket() {
 
       // Step 2: mirror the now-confirmed on-chain market into Postgres so
       // it shows up in fast reads (Discover, search) without polling chain.
-      setStep('recording')
-      await api.createMarket(
-        {
-          question: form.question,
-          category: form.category,
-          horizonYears: form.horizonYears,
-          resolutionCriteria: form.resolutionCriteria,
-          allowedEvidenceSources: form.allowedEvidenceSources,
-          initialLiquidity: form.initialLiquidity,
-        },
-        { contractMarketId: String(contractMarketId), txHash, resolvesAt },
-        token
-      )
-
-      setSubmitted(true)
-      setTimeout(() => navigate('/discover'), 900)
+      await recordOnChainResult({ txHash, contractMarketId, resolvesAt })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create market.')
     } finally {
@@ -204,7 +258,9 @@ export default function CreateMarket() {
               ? 'Confirm in wallet…'
               : step === 'recording'
                 ? 'Recording…'
-                : 'Create Market'}
+                : onChainResult
+                  ? 'Retry recording'
+                  : 'Create Market'}
         </Button>
       </form>
     </div>

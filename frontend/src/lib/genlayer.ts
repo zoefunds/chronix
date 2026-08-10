@@ -12,6 +12,16 @@ import type { Address } from 'genlayer-js/types'
 
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS as Address
 
+// GenLayer Studio currently caps requests at 30/min. Each receipt poll is
+// one request, so back-to-back writes (e.g. submitting several evidence
+// pointers in a row) can trip that cap purely from polling — the on-chain
+// tx still succeeds, but the poll throws before the frontend gets to mirror
+// it into Postgres, and the market/evidence goes missing from the UI until
+// the backend's chain-indexer backfill catches it. Spacing polls out
+// further keeps a single submission's own polling well under the cap.
+const RECEIPT_RETRIES = 15
+const RECEIPT_INTERVAL_MS = 5000
+
 export class GenLayerNotConfiguredError extends Error {
   constructor() {
     super('VITE_CONTRACT_ADDRESS is not set.')
@@ -67,7 +77,7 @@ async function write(
     args: args as never,
     value,
   })
-  await client.waitForTransactionReceipt({ hash, retries: 20, interval: 3000 })
+  await client.waitForTransactionReceipt({ hash, retries: RECEIPT_RETRIES, interval: RECEIPT_INTERVAL_MS })
   return hash as unknown as string
 }
 
@@ -100,7 +110,7 @@ export const genlayer = {
       ] as never,
       value,
     })
-    await client.waitForTransactionReceipt({ hash, retries: 20, interval: 3000 })
+    await client.waitForTransactionReceipt({ hash, retries: RECEIPT_RETRIES, interval: RECEIPT_INTERVAL_MS })
     // create_market returns the new market's id, but the simplest reliable
     // way to know it from the browser (without depending on decoded return
     // value shape) is: it's always market_count - 1 immediately after our
