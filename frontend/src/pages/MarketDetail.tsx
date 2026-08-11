@@ -110,6 +110,30 @@ export default function MarketDetail() {
     }
   }, [id])
 
+  // The contract now rejects submit_evidence_pointer calls whose source_type
+  // isn't in the market's own allowed_evidence_types (provenance hardening)
+  // — mirror that restriction here so the dropdown can't offer an option
+  // that would just revert on-chain. Empty/unset means "no restriction",
+  // matching the contract's own treatment of that case.
+  const allowedSourceTypes = useMemo<typeof evidenceSourceType[]>(() => {
+    const all: typeof evidenceSourceType[] = ['news', 'academic', 'government', 'market', 'social', 'primary']
+    if (!market?.allowed_evidence_types) return all
+    const allowed = new Set(
+      market.allowed_evidence_types.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    )
+    const filtered = all.filter((t) => allowed.has(t))
+    return filtered.length > 0 ? filtered : all
+  }, [market?.allowed_evidence_types])
+
+  useEffect(() => {
+    if (!allowedSourceTypes.includes(evidenceSourceType)) {
+      setEvidenceSourceType(allowedSourceTypes[0])
+    }
+    // Only re-run when the allowed set itself changes (i.e. once market
+    // loads) — not on every evidenceSourceType keystroke/selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedSourceTypes])
+
   const yesGen = market ? weiToGen(market.total_yes_wei) : 0
   const noGen = market ? weiToGen(market.total_no_wei) : 0
   const totalPool = yesGen + noGen
@@ -386,12 +410,11 @@ export default function MarketDetail() {
                     onChange={(e) => setEvidenceSourceType(e.target.value as typeof evidenceSourceType)}
                     className="bg-surface border border-border-slate focus:border-secondary focus:ring-0 outline-none rounded px-2 py-2 text-body-sm"
                   >
-                    <option value="news">news</option>
-                    <option value="academic">academic</option>
-                    <option value="government">government</option>
-                    <option value="market">market</option>
-                    <option value="social">social</option>
-                    <option value="primary">primary</option>
+                    {allowedSourceTypes.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
                   </select>
                   <input
                     value={evidenceUrl}

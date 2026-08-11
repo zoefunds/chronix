@@ -30,6 +30,10 @@ export interface MarketRow {
   total_yes_wei: string;
   total_no_wei: string;
   verdict: string | null;
+  // Mirrors the contract's allowed_evidence_types field. NULL/empty means
+  // no restriction — matches the contract's own treatment of an unset
+  // allow-list (see pure_is_allowed_source_type in contracts/chronix.py).
+  allowed_evidence_types: string | null;
   // Only present on listMarkets/getMarketById responses (LEFT JOIN count).
   participant_count?: string;
 }
@@ -121,11 +125,14 @@ export async function insertMarket(params: {
    * — see routes/markets.ts POST /markets docstring.
    */
   contractMarketId: string;
+  /** Comma-separated, matching what was sent on-chain to create_market. */
+  allowedEvidenceTypes?: string | null;
 }): Promise<MarketRow> {
   const res = await query<MarketRow>(
     `INSERT INTO markets
-       (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at, contract_market_id)
-     VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+       (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at,
+        contract_market_id, allowed_evidence_types)
+     VALUES ($1, $2, $3, $4, $5, 'open', $6, $7, $8)
      RETURNING *`,
     [
       params.question,
@@ -135,6 +142,7 @@ export async function insertMarket(params: {
       params.createdBy,
       params.resolvesAt,
       params.contractMarketId,
+      params.allowedEvidenceTypes ?? null,
     ]
   );
   return res.rows[0];
@@ -194,12 +202,13 @@ export async function insertMarketFromChain(params: {
   poolDepositedWei: string;
   totalYesWei: string;
   totalNoWei: string;
+  allowedEvidenceTypes?: string | null;
 }): Promise<MarketRow> {
   const res = await query<MarketRow>(
     `INSERT INTO markets
        (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at,
-        contract_market_id, verdict, pool_deposited_wei, total_yes_wei, total_no_wei)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        contract_market_id, verdict, pool_deposited_wei, total_yes_wei, total_no_wei, allowed_evidence_types)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      ON CONFLICT (contract_market_id) WHERE contract_market_id IS NOT NULL DO NOTHING
      RETURNING *`,
     [
@@ -215,6 +224,7 @@ export async function insertMarketFromChain(params: {
       params.poolDepositedWei,
       params.totalYesWei,
       params.totalNoWei,
+      params.allowedEvidenceTypes ?? null,
     ]
   );
   return res.rows[0];

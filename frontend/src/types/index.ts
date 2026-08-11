@@ -38,6 +38,8 @@ export interface Market {
   total_yes_wei: string
   total_no_wei: string
   verdict: string | null
+  /** Comma-separated; NULL/empty means the contract enforces no restriction. */
+  allowed_evidence_types: string | null
   participant_count?: string
 }
 

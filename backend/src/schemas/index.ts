@@ -43,6 +43,11 @@ export const createMarketSchema = z.object({
   resolvesAt: z.string().datetime(),
   contractMarketId: z.string().regex(/^\d+$/, "Must be the numeric id returned by create_market"),
   txHash: z.string().min(1),
+  // Same comma-separated categories already sent on-chain to create_market
+  // — mirrored here so the frontend can filter the evidence-submission
+  // dropdown to what the contract will actually accept (it now enforces
+  // this allow-list on submit_evidence_pointer).
+  allowedEvidenceSources: z.array(z.string().min(1)).optional(),
 });
 
 // Same pattern: submit_evidence_pointer was already signed and sent by the

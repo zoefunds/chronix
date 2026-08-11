@@ -22,6 +22,13 @@ Chronix is a decentralized, long-horizon prediction market. Users stake real GEN
 - [API overview](#api-overview)
 - [Troubleshooting](#troubleshooting)
 
+> **Payout-core review (2026-08-11)**: a team review required six fixes to the settlement/escrow
+> logic before the contract could be credited — validator agreement on the derived verdict,
+> excluding failed fetches, closing staking at the deadline, timeout refunds for every eligible
+> participant (not just the first), contract tests for those paths, and stronger evidence
+> provenance/deduplication. All six are fixed, tested (35 passing contract tests), and live on a
+> new contract deployment. Full before/after detail: [`REVIEW.md`](REVIEW.md).
+
 ## How it works
 
 1. **Create a market** — anyone can propose a question with a resolution horizon, resolution criteria, and initial liquidity (real GEN, sent with the transaction).
@@ -80,6 +87,7 @@ chronix/
 │   └── package.json
 ├── contracts/
 │   ├── chronix.py       the Intelligent Contract (pure logic + gl.Contract class)
+│   ├── tests/           pytest suite against the pure-logic slice (no genlayer package needed)
 │   └── README.md        contract-specific docs (state machine, method reference)
 ├── database/
 │   ├── schema.sql        full schema reference
@@ -91,6 +99,7 @@ chronix/
 ├── docker-compose.yml    local Postgres + backend stack
 ├── PLANNING.md           locked architecture decisions
 ├── MEMORY.md             deployment state, gotchas, and history (read before deploying)
+├── REVIEW.md             latest team code-review response — what was flagged, what changed
 └── .env.example          root-level env reference (see also per-package .env.example)
 ```
 
@@ -186,7 +195,7 @@ Core tables:
 - `evidence` — submitted evidence pointers (URL + summary), used only as leads — the contract re-fetches independently at settlement
 - `chain_sync_queue` — retry queue so a failed chain write is retried with backoff instead of silently dropped
 
-`markets.contract_market_id` and `evidence.(market_id, url)` both carry unique indexes (migrations `005`, `006`) — required so the chain indexer's discovery/backfill pass (see [Architecture](#architecture)) can safely run concurrently across both backend machines without inserting duplicate rows.
+`markets.contract_market_id` and `evidence.(market_id, url)` both carry unique indexes (migrations `005`, `006`) — required so the chain indexer's discovery/backfill pass (see [Architecture](#architecture)) can safely run concurrently across both backend machines without inserting duplicate rows. `markets.allowed_evidence_types` (migration `007`) mirrors the contract's own field so the evidence-submission UI can filter to only the source types the contract will actually accept (it now enforces this allow-list on-chain).
 
 Run migrations:
 
@@ -213,9 +222,12 @@ cd frontend && npm run test
 # Type-check only
 cd backend && npm run lint    # tsc --noEmit
 cd frontend && npx tsc --noEmit
+
+# Contract (pure logic only — no genlayer package or GenVM needed)
+cd contracts && python3 -m pytest tests/ -v
 ```
 
-Contract logic (`contracts/chronix.py`) is split into pure Python helpers (state machine, payout math, key-building) above `# END PURE LOGIC`, and a thin `Chronix(gl.Contract)` adapter class below it — GenVM itself cannot run inside pytest, so tests target the pure helpers directly. See [`contracts/README.md`](contracts/README.md).
+Contract logic (`contracts/chronix.py`) is split into pure Python helpers (state machine, payout math, key-building, verdict derivation, escrow math) above `# END PURE LOGIC`, and a thin `Chronix(gl.Contract)` adapter class below it — GenVM itself cannot run inside pytest, so `contracts/tests/` targets the pure helpers directly (via `_pure.py`, which execs just that slice of the real file rather than a hand-copied duplicate). Covers settlement (verdict agreement, failed-fetch exclusion) and escrow (staking-deadline cutoff, timeout-refund eligibility for every claimant, payout math, provenance/dedup). See [`contracts/README.md`](contracts/README.md).
 
 ## Smart contract
 
@@ -233,7 +245,7 @@ awaiting_adjudication -> refunded_timeout                            (claim_time
 
 **Key methods:** `create_market` (payable), `stake` (payable), `submit_evidence_pointer`, `request_adjudication`, `settle` (nondet web-fetch consensus), `claim_payout`, `claim_timeout_refund`, `cancel_market`.
 
-**Deployment**: contract deploys are manual (GenVM contracts are immutable — every fix needs a fresh address). Deploy via GenLayer Studio, then set `CONTRACT_ADDRESS` / `VITE_CONTRACT_ADDRESS` everywhere (backend `.env`, frontend `.env`, Fly secrets, Vercel env vars) to the new address. Full deployment history and gotchas (e.g. the `gl.nondet.web.*` API rename, time-source fallbacks) are logged in [`MEMORY.md`](MEMORY.md).
+**Deployment**: contract deploys are manual, always by the project owner (this repo never deploys the contract) — GenVM contracts are immutable, so every fix needs a fresh address, never a patch. After a new address is deployed: set `CONTRACT_ADDRESS` / `VITE_CONTRACT_ADDRESS` everywhere (`.env.example`, `backend/.env`, `frontend/.env`, the `chronix-backend` Fly secret, the Vercel production env var — Vercel env vars must be removed and re-added, there's no update-in-place via the CLI), redeploy both backend and frontend, and **clear any Postgres rows tied to the old address** (`DELETE FROM markets`, which cascades to `positions`/`evidence`/`market_events`/`chain_sync_queue`) — their `contract_market_id`s point at markets on the now-abandoned contract and would otherwise silently mismatch against the new one's fresh `market_count` sequence. Full deployment history, the current live address, and gotchas (e.g. the `gl.nondet.web.*` API rename, time-source fallbacks) are logged in [`MEMORY.md`](MEMORY.md); the most recent contract-logic changes and why are in [`REVIEW.md`](REVIEW.md).
 
 Full method reference and design notes: [`contracts/README.md`](contracts/README.md).
 
@@ -290,8 +302,8 @@ For full deployment history, past incidents, and hard-won gotchas (Dockerfile bu
 
 - **The backend never holds a key that can move user GEN.** All money-moving contract methods (`create_market`, `stake`, `claim_payout`, `claim_timeout_refund`, `cancel_market`) are signed directly by the end user's own wallet in the browser via `genlayer-js`. The backend only records what already happened on-chain — it requires `contractMarketId`/`txHash` as proof before writing a position or market row, it never submits these writes itself.
 - **The optional keeper key** (`GENLAYER_KEEPER_PRIVATE_KEY`) only ever calls `request_adjudication` and `settle` — both non-payable and fully permissionless (any wallet could call them with identical effect). It's a convenience automation, not a privileged actor, and cannot move user funds even if compromised. It does need a small GEN balance to pay its own gas.
-- **Deadlines are enforced on-chain**, not just in a backend cron — `request_adjudication` checks `now >= resolves_at` itself inside the contract, so a compromised or drifting backend clock can't force early settlement.
-- **Adjudication never trusts user-submitted text.** `submit_evidence_pointer` only stores a URL; `settle` independently re-fetches from ≥3 real source categories and reaches consensus via GenVM's nondeterministic-block equivalence principle.
+- **Deadlines are enforced on-chain**, not just in a backend cron — `request_adjudication` checks `now >= resolves_at` itself inside the contract, so a compromised or drifting backend clock can't force early settlement. `stake()` independently re-checks the same deadline (not just `market.status`), so staking actually closes the instant `resolves_at` passes rather than staying open for however long it takes someone to call `request_adjudication`.
+- **Adjudication never trusts user-submitted text**, and every eligible participant can always exit. `submit_evidence_pointer` only stores a URL (validated against the market's own configured `allowed_evidence_types`, and deduplicated — a URL can't be submitted twice for the same market); `settle` independently re-fetches from ≥3 real source categories, excludes any source that fails to fetch from the agreement tally entirely (a dead link can't dilute or grief a decision), and requires validators to independently derive the SAME verdict (via `pure_decide_verdict`) from their own fetch, not merely produce similar raw vote counts — GenVM's nondeterministic-block equivalence principle applied to the value that actually gets persisted and paid out against. `claim_timeout_refund` is available to every staker who hasn't yet claimed once the grace window elapses, not just the first caller (a first-claimant flips `market.status` to `refunded_timeout` as a UI signal, but that status is itself still a valid state to claim from — the per-wallet `payout_claimed` flag is what actually prevents a double-claim).
 - **Escrow ordering** is strictly read-ledger → zero-ledger → persist → transfer, funneled through a single `_send_gen` chokepoint, to prevent reentrancy/double-spend.
 - **A Postgres row is only marked `confirmed`** after a real on-chain transaction receipt confirms it — the DB is a read cache, never a source of truth for money.
 - **The frontend never resubmits a wallet-signed write to paper over a mirror failure.** If a market/stake/evidence tx confirms on-chain but the follow-up `POST` to Postgres fails (expired session, rate limit, network blip), the UI holds onto the confirmed `txHash` and offers "Retry recording" rather than re-running the on-chain call — a second on-chain submission would mean actually paying/staking twice. The chain indexer's backfill pass is the real safety net: it independently discovers and mirrors anything confirmed on-chain that Postgres is missing, with or without a retry.
@@ -306,7 +318,7 @@ Base URL: `http://localhost:8080` (dev) or `https://chronix-backend.fly.dev` (pr
 | `/auth/nonce` | POST | issue a SIWE nonce |
 | `/auth/verify` | POST | verify a signed SIWE message, issue a session |
 | `/markets` | GET | list markets |
-| `/markets` | POST | mirror an already-confirmed `create_market` tx into Postgres (requires `txHash`/`contractMarketId`) |
+| `/markets` | POST | mirror an already-confirmed `create_market` tx into Postgres (requires `txHash`/`contractMarketId`; `allowedEvidenceSources` mirrors the same value already sent on-chain) |
 | `/markets/:id` | GET | market detail |
 | `/markets/:id/positions` | POST | record a stake already confirmed on-chain (requires `txHash`/`contractMarketId`) |
 | `/markets/:id/evidence` | GET/POST | evidence pointers for a market — `GET` paginated (`limit`, default 50/max 200; `offset`) |

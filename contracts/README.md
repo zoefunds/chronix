@@ -102,3 +102,29 @@ Pure functions (prefixed `pure_`) in the top half of `chronix.py` are
 plain Python and can be imported directly by pytest — no GenVM required.
 gl-dependent methods require the GenLayer `gltest` harness / GenLayer
 Studio to execute.
+
+`contracts/tests/` covers the settlement and escrow paths this way:
+`_pure.py` execs just the pure-logic slice of `chronix.py` (between the
+`SECTION 0` and `END PURE LOGIC` banner comments) into an isolated
+namespace — no `genlayer` package needed, and no risk of a hand-copied
+duplicate of the logic silently drifting from the real contract.
+`test_settlement_escrow.py` then exercises verdict derivation and the
+agreement threshold, the effect of excluding a failed/unreachable fetch
+from the source tally, the staking-deadline cutoff, timeout-refund
+eligibility for every claimant (not just the first), winner/split payout
+math, the reentrancy/double-claim guard, and evidence provenance
+(allowed source types) + URL deduplication. Run with:
+
+```bash
+cd contracts && python3 -m pytest tests/ -v
+```
+
+gl-dependent behavior that these pure-logic tests can't reach directly —
+e.g. that `settle`'s `validator_fn` actually calls `pure_decide_verdict`
+on both the leader's and its own tally and rejects a mismatch, or that
+`fetch_and_classify`'s `except` branch really does skip incrementing
+`total` — is covered by direct unit tests on the underlying pure
+functions with the exact inputs those code paths would produce (see
+`TestFailedFetchExclusion`, `TestDecideVerdict`), plus needs a real
+`gltest`/Studio run before trusting a new deployment, same as any other
+nondet-block behavior in this file.

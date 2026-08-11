@@ -163,9 +163,20 @@ def pure_validate_transition(current_status: str, next_status: str) -> bool:
     return next_status in allowed
 
 
-def pure_can_stake(status: str) -> bool:
-    """Stakes are only accepted while a market is active."""
-    return status == STATUS_ACTIVE
+def pure_can_stake(status: str, now_ts: int, resolves_at: int) -> bool:
+    """
+    Stakes are only accepted while a market is active AND before its
+    resolution deadline has passed. `status` alone is not sufficient: it
+    can lag behind wall-clock time indefinitely, because the active ->
+    awaiting_adjudication transition only happens when someone calls
+    request_adjudication — nothing forces that to happen exactly at the
+    deadline. Without this second check, staking would stay open past
+    resolves_at for as long as nobody bothered to call
+    request_adjudication, which both unfairly lets late stakers front-run
+    the verdict with post-deadline information and can shift payout
+    shares for everyone already staked.
+    """
+    return status == STATUS_ACTIVE and not pure_is_deadline_passed(now_ts, resolves_at)
 
 
 def pure_can_cancel(status: str, total_yes: int, total_no: int) -> bool:
@@ -185,10 +196,18 @@ def pure_can_settle(status: str) -> bool:
 def pure_can_claim_timeout_refund(status: str, now_ts: int, adjudication_requested_at: int) -> bool:
     """
     Timeout refund is only legal once the grace window has elapsed WITHOUT
-    a completed settle() — i.e. the market is still awaiting_adjudication
-    and the grace window is over.
+    a completed settle(). The FIRST staker to claim flips market.status
+    from awaiting_adjudication to refunded_timeout (a UI signal), so both
+    statuses must be accepted here — otherwise every staker AFTER the
+    first would be wrongly rejected by this status check even though
+    they're still eligible and haven't claimed yet. It's payout_claimed[]
+    (checked by the caller, keyed per-wallet) that actually prevents a
+    double-claim, not market.status — status here only needs to rule out
+    markets that were never in (or past) the timeout-eligible state at
+    all, e.g. still active, cancelled, or already settled by a real
+    verdict.
     """
-    if status != STATUS_AWAITING_ADJUDICATION:
+    if status not in (STATUS_AWAITING_ADJUDICATION, STATUS_REFUNDED_TIMEOUT):
         return False
     return not pure_is_within_grace_window(now_ts, adjudication_requested_at)
 
@@ -255,6 +274,42 @@ def pure_compute_source_agreement_bps(agreeing_sources: int, total_sources: int)
     if total_sources <= 0:
         return 0
     return (agreeing_sources * BPS_DENOMINATOR) // total_sources
+
+
+def pure_normalize_url(url: str) -> str:
+    """Case/whitespace-insensitive comparison key for evidence URLs."""
+    return url.strip().lower()
+
+
+def pure_is_duplicate_url(existing_urls: list, url: str) -> bool:
+    """
+    True if `url` (normalized) already appears among `existing_urls`.
+    Prevents the same source from being submitted repeatedly — whether by
+    accident (double-click) or deliberately by one or many wallets to
+    pad a market's apparent evidence count / weight a settle() fetch
+    toward one URL by sheer repetition.
+    """
+    normalized = pure_normalize_url(url)
+    return any(pure_normalize_url(u) == normalized for u in existing_urls)
+
+
+def pure_parse_allowed_source_types(allowed_evidence_types: str) -> set:
+    """Parses a market's comma-separated allowed_evidence_types into a lowercase set."""
+    return {t.strip().lower() for t in allowed_evidence_types.split(",") if t.strip()}
+
+
+def pure_is_allowed_source_type(allowed_evidence_types: str, source_type: str) -> bool:
+    """
+    True if `source_type` is one of the categories the market's creator
+    configured as acceptable at create_market time. An empty/unset
+    allow-list is treated as "no restriction configured" (open) rather
+    than "nothing allowed", so markets created before this field existed
+    (or with a blank value) aren't retroactively broken.
+    """
+    allowed = pure_parse_allowed_source_types(allowed_evidence_types)
+    if not allowed:
+        return True
+    return source_type.strip().lower() in allowed
 
 
 def pure_decide_verdict(
@@ -567,10 +622,12 @@ class Chronix(gl.Contract):
         method deliberately does not accept one at all.
         """
         market = self._require_market(market_id)
+        now_ts = self._now()
 
-        if not pure_can_stake(market.status):
+        if not pure_can_stake(market.status, now_ts, int(market.resolves_at)):
             raise gl.vm.UserError(
-                f"market {market_id} is not accepting stakes (status={market.status})"
+                f"market {market_id} is not accepting stakes (status={market.status}, "
+                f"now={now_ts}, resolves_at={int(market.resolves_at)})"
             )
         if side not in (SIDE_YES, SIDE_NO):
             raise gl.vm.UserError(f"side must be '{SIDE_YES}' or '{SIDE_NO}', got {side!r}")
@@ -617,8 +674,23 @@ class Chronix(gl.Contract):
             raise gl.vm.UserError("url must not be empty")
         if not source_type or not source_type.strip():
             raise gl.vm.UserError("source_type must not be empty")
+        if not pure_is_allowed_source_type(market.allowed_evidence_types, source_type):
+            raise gl.vm.UserError(
+                f"source_type {source_type!r} is not one of this market's allowed "
+                f"evidence source types ({market.allowed_evidence_types!r})"
+            )
 
-        idx = int(market.evidence_count)
+        evidence_count = int(market.evidence_count)
+        existing_urls = [
+            self.evidence_url.get(pure_make_evidence_key(int(market_id), i), "")
+            for i in range(evidence_count)
+        ]
+        if pure_is_duplicate_url(existing_urls, url):
+            raise gl.vm.UserError(
+                f"this URL has already been submitted as evidence for market {market_id}"
+            )
+
+        idx = evidence_count
         key = pure_make_evidence_key(int(market_id), idx)
         self.evidence_url[key] = url
         self.evidence_source_type[key] = source_type
@@ -683,7 +755,12 @@ class Chronix(gl.Contract):
         of every tiny wording difference producing "undetermined". The
         final verdict then requires a percentage-of-sources threshold
         (`SOURCE_AGREEMENT_THRESHOLD_BPS`) rather than unanimous or exact
-        agreement — see `pure_decide_verdict`.
+        agreement — see `pure_decide_verdict`. Consensus itself is gated
+        on validators independently DERIVING THE SAME VERDICT from their
+        own fetch, not merely producing similar raw vote tallies (see
+        `validator_fn` below) — a source that fails to fetch is excluded
+        from consideration entirely rather than diluting the agreement
+        ratio as an uncounted "neither" vote.
         """
         market = self._require_market(market_id)
         if not pure_can_settle(market.status):
@@ -750,10 +827,18 @@ class Chronix(gl.Contract):
                         )
                         web_text = gl.nondet.web.render(search_url, mode="text")
                 except Exception:
-                    # Unreachable source: counts toward total (so a market
-                    # with too many dead links correctly fails to reach
-                    # the agreement threshold) but contributes no vote.
-                    total += 1
+                    # Unreachable source: EXCLUDED entirely, not counted
+                    # toward `total`. A dead link was never actually
+                    # consulted, so letting it inflate the denominator
+                    # would let a market be griefed toward SPLIT/
+                    # UNDETERMINED just by seeding a few broken URLs
+                    # alongside otherwise-decisive real evidence. If too
+                    # few sources end up USABLE, `pure_decide_verdict`
+                    # already returns UNDETERMINED via the
+                    # MIN_EVIDENCE_SOURCE_CATEGORIES floor below — that's
+                    # the correct place for "not enough real evidence" to
+                    # be caught, not by penalizing a good source list for
+                    # someone else's broken link.
                     continue
 
                 prompt = f"""
@@ -791,12 +876,16 @@ No other text, no markdown fences.
             NOT just check that the leader's calldata is valid JSON shape
             — per the equivalence-principle docs, that alone "is not
             performing consensus". Instead the validator independently
-            re-fetches and re-classifies every source and requires the
+            re-fetches and re-classifies every source, requires the
             resulting vote TALLIES to be close (each vote count within one
-            of the leader's), which tolerates minor LLM wording
-            differences while still requiring the validator to have
-            actually looked at the same real evidence and reached a
-            compatible conclusion.
+            of the leader's) as a sanity floor, AND — this is the part
+            that actually matters for what gets persisted — requires the
+            DERIVED VERDICT (what `pure_decide_verdict` returns for each
+            side's tally) to match exactly. Tally closeness alone isn't
+            enough: two tallies that are each within ±1 of each other can
+            still straddle `SOURCE_AGREEMENT_THRESHOLD_BPS` and decide to
+            different verdicts, and the verdict — not the raw counts — is
+            what settle() writes to market.verdict and pays out against.
             """
             if not isinstance(leader_result, gl.vm.Return):
                 return False
@@ -813,7 +902,15 @@ No other text, no markdown fences.
             for side_key in ("YES", "NO", "NEITHER"):
                 if abs(int(leader_votes.get(side_key, 0)) - int(validator_votes.get(side_key, 0))) > 1:
                     return False
-            return True
+            leader_verdict = pure_decide_verdict(
+                int(leader_votes.get("YES", 0)), int(leader_votes.get("NO", 0)),
+                int(leader_data.get("total", 0)),
+            )
+            validator_verdict = pure_decide_verdict(
+                int(validator_votes.get("YES", 0)), int(validator_votes.get("NO", 0)),
+                int(validator_data.get("total", 0)),
+            )
+            return leader_verdict == validator_verdict
 
         result_json = gl.vm.run_nondet(fetch_and_classify, validator_fn)
         result = json.loads(result_json)

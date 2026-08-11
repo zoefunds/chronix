@@ -93,6 +93,7 @@ export const api = {
           resolvesAt: onChain.resolvesAt,
           contractMarketId: onChain.contractMarketId,
           txHash: onChain.txHash,
+          allowedEvidenceSources: payload.allowedEvidenceSources,
         }),
       },
       token,

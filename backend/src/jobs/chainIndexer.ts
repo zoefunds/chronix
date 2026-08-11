@@ -176,6 +176,7 @@ async function discoverNewMarkets(): Promise<number> {
         poolDepositedWei: chain.poolDeposited,
         totalYesWei: chain.totalYes,
         totalNoWei: chain.totalNo,
+        allowedEvidenceTypes: chain.allowedEvidenceTypes || null,
       });
       if (inserted) {
         discovered += 1;

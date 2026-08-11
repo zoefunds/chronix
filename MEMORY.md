@@ -56,9 +56,23 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 
 ## Deployment state
 
-- **Contract address**: **DEPLOYED (v3)** — `0x0a58dAb6DCE66124CE28D79Af4124BaB85A100ED` on
-  GenLayer Studio/StudioNet, deployed 2026-07-31. History of prior dead deployments (GenVM
-  contracts are immutable — every code fix requires a brand-new address, not a patch):
+- **Contract address**: **DEPLOYED (v4)** — `0xda22B6c11d3709d8Fb446C2aFf569991fC4ACE39` on
+  GenLayer Studio/StudioNet, deployed 2026-08-11 by the user themselves (this repo never
+  deploys the contract). Includes the "Payout-core review fixes" below (validator
+  verdict-agreement, failed-fetch exclusion, staking-deadline cutoff, timeout-refund-for-every-
+  claimant, evidence provenance/dedup) — none of which were live on v3. Wired into
+  `.env.example`, `backend/.env.example`, `backend/.env`, `frontend/.env.example`,
+  `frontend/.env`, the `chronix-backend` Fly secret `CONTRACT_ADDRESS`, and the Vercel
+  production env var `VITE_CONTRACT_ADDRESS` (removed + re-added, since Vercel env vars are
+  write-only from the CLI — there's no "update in place"). Both backend and frontend
+  redeployed after the swap. **Postgres was fully cleared of v3-era data** (`DELETE FROM
+  markets`, cascading to `positions`/`evidence`/`market_events`/`chain_sync_queue` via their
+  `ON DELETE CASCADE` FKs) since every existing row's `contract_market_id` pointed at markets
+  on the now-abandoned v3 contract — those ids mean nothing on v4's fresh `market_count`
+  sequence, so keeping them would have silently mismatched Postgres rows to the wrong on-chain
+  market. `chronix-backend.fly.dev/markets` confirmed empty immediately after.
+  History of prior dead deployments (GenVM contracts are immutable — every code fix requires a
+  brand-new address, not a patch):
   - v1 `0xF0308C069Fb536D334926A01d2d625467fe77b0e` — dead. First `create_market` reverted:
     `AttributeError: module 'genlayer.gl' has no attribute 'get_webpage'` (pinned runner had
     moved that API to `gl.nondet.web.*`).
@@ -66,11 +80,11 @@ deployment state, gotchas, and open TODOs for the Chronix project.
     `create_market` reverted differently: `NondetException: Connection reset by peer` trying
     to reach `worldtimeapi.org` from GenVM's sandboxed egress — an external-service
     reliability issue, not a code bug.
-  - v3 (current) adds fallback across three independent time sources (worldtimeapi.org ->
-    Cloudflare `/cdn-cgi/trace` -> timeapi.io) in `_now()`. Not yet confirmed working by an
-    actual successful `create_market` tx — confirm before trusting this address long-term.
-  Wired into `.env.example`, `backend/.env.example`, `backend/.env`, `frontend/.env.example`,
-  `frontend/.env`, Fly secrets, and Vercel env vars.
+  - v3 `0x0a58dAb6DCE66124CE28D79Af4124BaB85A100ED` — superseded, not dead (worked fine; just
+    doesn't have the payout-core fixes). Added fallback across three independent time sources
+    (worldtimeapi.org -> Cloudflare `/cdn-cgi/trace` -> timeapi.io) in `_now()`. Confirmed
+    working via real `create_market`/`submit_evidence_pointer` txs throughout the 2026-08-10
+    session.
 - **Contract header** (do not touch again): the file that actually deployed successfully uses
   `# v0.2.16` + `# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }`
   as the first two lines — this is the user's own edit, confirmed working. An earlier attempt
@@ -107,7 +121,7 @@ deployment state, gotchas, and open TODOs for the Chronix project.
 - **Database**: production is Fly Postgres (`chronix-db`), now a 3-node HA cluster — 1 primary
   (iad) + 2 replicas (iad, lhr), see Open TODOs below for exact machine IDs. Migrations applied via
   `fly ssh console -a chronix-backend -C "node dist/db/migrate.js"` after each deploy that adds
-  one — currently 001-006 all applied. Local dev still uses `docker-compose.yml`.
+  one — currently 001-007 all applied. Local dev still uses `docker-compose.yml`.
 - **Keeper wallet funded (2026-07-30)**: user confirmed the keeper address
   (`0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`) already has enough GEN on GenLayer Studio's
   network — no further faucet action needed. `request_adjudication`/`settle` should now run
@@ -166,6 +180,72 @@ deployment state, gotchas, and open TODOs for the Chronix project.
     similar) is blocked by the sandbox's auto-mode classifier even with explicit user chat
     approval — don't try to work around it; `fly postgres connect` itself (which never surfaces
     the password) is the sanctioned path.
+- **Payout-core review fixes (2026-08-10)**: a team review of `contracts/chronix.py` flagged
+  five issues before the contract could "receive project credit" — all fixed, contract tests
+  added, but **NOT YET on any deployed address** (see the v4-pending note under Contract
+  address above — user is deploying this themselves). Changes, all in `contracts/chronix.py`
+  unless noted:
+  1. **Validator agreement on the derived verdict**: `settle()`'s `validator_fn` used to only
+     check that leader/validator vote TALLIES were within ±1 of each other — it never checked
+     that applying `pure_decide_verdict` to each side's tally actually produced the SAME
+     verdict, and two tallies that are each individually within tolerance can still straddle
+     `SOURCE_AGREEMENT_THRESHOLD_BPS` and decide differently. Now explicitly computes and
+     compares `pure_decide_verdict(leader_votes, ...)` vs `pure_decide_verdict(validator_votes,
+     ...)` and requires an exact match, on top of (not instead of) the existing tally-closeness
+     check.
+  2. **Exclude failed fetches**: `fetch_and_classify`'s `except` branch used to still
+     `total += 1` on an unreachable source before `continue`ing — a dead link diluted the
+     agreement denominator as a silent "neither" vote instead of being excluded, which both
+     obscured genuinely strong evidence and opened a griefing vector (seed a market with a few
+     broken links to force SPLIT/UNDETERMINED). Now `continue`s without incrementing `total` —
+     a failed fetch is exactly as if it was never attempted. The
+     `MIN_EVIDENCE_SOURCE_CATEGORIES` floor in `pure_decide_verdict` is what correctly still
+     returns UNDETERMINED if too few sources end up usable.
+  3. **Close staking at the deadline**: `pure_can_stake` only ever checked `status ==
+     STATUS_ACTIVE` — since the active -> awaiting_adjudication transition only happens when
+     someone calls `request_adjudication`, staking silently stayed open past `resolves_at` for
+     as long as nobody bothered to call it, letting late stakers stake with post-deadline
+     information. `pure_can_stake` now takes `(status, now_ts, resolves_at)` and also requires
+     `not pure_is_deadline_passed(...)`; `stake()` now calls `self._now()` (the existing
+     cross-validated nondet time read, same one `request_adjudication` already used) before
+     checking it.
+  4. **Every eligible participant can complete a timeout refund**: `pure_can_claim_timeout_refund`
+     only accepted `status == STATUS_AWAITING_ADJUDICATION`. The FIRST successful
+     `claim_timeout_refund()` call flips `market.status` to `STATUS_REFUNDED_TIMEOUT` (a UI
+     signal) — every subsequent eligible staker calling it was then wrongly rejected by this
+     exact status check, even though they'd never claimed and `payout_claimed[]` (the actual
+     per-wallet double-claim guard) still showed `False` for them. Fixed by accepting status in
+     `(STATUS_AWAITING_ADJUDICATION, STATUS_REFUNDED_TIMEOUT)`.
+  5. **Source provenance + deduplication**: `submit_evidence_pointer` never validated
+     `source_type` against anything, and never checked for duplicate URLs — anyone could tag a
+     pointer with an arbitrary string, or submit the same URL repeatedly (by accident or to pad
+     a market's apparent evidence count). Added `pure_is_allowed_source_type` (checks against
+     the market's own `allowed_evidence_types`, configured at `create_market` time; an
+     empty/unset allow-list means unrestricted, so pre-existing markets aren't broken) and
+     `pure_is_duplicate_url` (case/whitespace-insensitive exact match against every URL already
+     recorded for that market — O(n) storage reads per submission, acceptable at expected
+     evidence-per-market volumes).
+  - **Consequence this surfaced**: `allowed_evidence_types` was only ever stored ON-CHAIN — the
+    Postgres mirror never had it, so the frontend's evidence-source dropdown couldn't know
+    what the contract would actually accept once (5) started enforcing it. Added migration
+    `database/migrations/007_market_allowed_evidence_types.sql`, threaded `allowedEvidenceSources`
+    through `POST /markets`'s schema/route/`insertMarket` and the chain indexer's
+    `insertMarketFromChain` backfill path (chain's `get_market()` already exposed
+    `allowed_evidence_types`, it just wasn't being persisted), and `MarketDetail.tsx` now
+    filters its evidence-source `<select>` to `market.allowed_evidence_types` (falling back to
+    the full option list when unset, matching the contract's own "empty = unrestricted").
+  - **Tests**: `contracts/tests/` — `_pure.py` execs just the pure-logic slice of `chronix.py`
+    (between the `SECTION 0` and `END PURE LOGIC` banner comments) into an isolated namespace,
+    since the real `genlayer` package isn't installed locally (GenVM runs inside GenLayer
+    Studio's own sandbox) and `chronix.py`'s first line is `from genlayer import *`. This avoids
+    hand-copying the pure logic into a test-only duplicate that could silently drift from the
+    real file. `test_settlement_escrow.py` (35 tests, all passing) covers verdict derivation +
+    agreement threshold, the failed-fetch-exclusion effect, staking-deadline cutoff,
+    timeout-refund eligibility for every claimant, winner/split payout math, the
+    reentrancy/double-claim guard, and provenance/dedup. Run: `cd contracts && python3 -m
+    pytest tests/ -v`.
+  - `py_compile` and the existing pytest suite were both re-verified clean after every edit;
+    `backend`/`frontend` both typecheck and build clean with the schema/API/UI changes above.
 
 ## Known gotchas / hard-won lessons
 

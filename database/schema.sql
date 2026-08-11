@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS markets (
     pool_deposited_wei      NUMERIC(78, 0) NOT NULL DEFAULT 0,
     total_yes_wei           NUMERIC(78, 0) NOT NULL DEFAULT 0,
     total_no_wei            NUMERIC(78, 0) NOT NULL DEFAULT 0,
-    verdict                 TEXT
+    verdict                 TEXT,
+    allowed_evidence_types  TEXT                 -- mirrors the contract field; NULL/empty = no restriction
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status);

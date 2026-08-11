@@ -94,6 +94,7 @@ export async function marketsRoutes(fastify: FastifyInstance) {
           createdBy: wallet,
           resolvesAt: body.resolvesAt,
           contractMarketId: body.contractMarketId,
+          allowedEvidenceTypes: body.allowedEvidenceSources?.join(",") ?? null,
         });
 
         await insertMarketEvent(
