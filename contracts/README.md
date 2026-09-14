@@ -1,8 +1,18 @@
 # chronix.py — GenLayer Intelligent Contract
 
 Single Intelligent Contract for Chronix, targeting GenLayer Studio /
-StudioNet, gas token GEN. Not yet deployed — deploy manually and set
-`CONTRACT_ADDRESS` in `.env` once you have an address.
+StudioNet. This contract holds **no money** — it is adjudication + ledger
+logic only. Real funding (initial liquidity, YES/NO stakes, and every
+payout/refund) is real USDC custodied by `ChronixEscrow.sol`
+(`contracts/base/`) on Base Sepolia. Every write method here is
+relayer-gated (`_require_relayer`): a backend service wallet mirrors
+confirmed Base Sepolia USDC activity onto this contract, and mirrors this
+contract's settlement outcomes back onto the escrow so wallets can
+self-serve `claim()` there. See `contracts/base/README.md` for the escrow
+side and the `Chronix` class docstring in `chronix.py` for the full trust
+model. Deploy this contract with the constructor arg `relayer_address` set
+to the SAME wallet address configured as `ChronixEscrow`'s `relayer_`
+constructor argument, then set `CONTRACT_ADDRESS` in `backend/.env`.
 
 ## File layout
 
@@ -38,27 +48,32 @@ with `gl.vm.UserError` if the action is illegal for that state
 
 | Method | Type | Description |
 |---|---|---|
-| `create_market(question, category, horizon_years, resolution_criteria, allowed_evidence_types)` | payable write | Seeds `pool_deposited` from `gl.message.value`. Rejects `<= 0`. `horizon_years` in `{3, 5, 10, 0}` (0 = permanent). Returns new `market_id`. |
-| `stake(market_id, side)` | payable write | Records a YES/NO stake from `gl.message.value` only — never trusts a caller-supplied amount. |
-| `submit_evidence_pointer(market_id, source_type, url)` | write | Stores a pointer. Never trusted as fact — only `settle`'s own fetch is authoritative. |
-| `request_adjudication(market_id)` | write | Reverts unless `now >= resolves_at`, using a nondet-cross-validated time source (see below). On-chain enforced, not a backend cron. |
-| `settle(market_id)` | write | Fetches real evidence across news / academic / financial source categories, classifies each via LLM, and requires a basis-points agreement threshold (not strict equality) across leader/validators. Produces `YES`, `NO`, or `SPLIT`. |
-| `claim_payout(market_id)` | write | Pays out a settled market's winnings. Zeroes the caller's stake ledger fields and persists that BEFORE calling `_send_gen`. |
-| `claim_timeout_refund(market_id)` | write | Backstop: if `settle` never completes within the grace window, any staker can reclaim their own stake. Same zero-before-transfer ordering. |
-| `cancel_market(market_id)` | write | Creator-only, pre-participation-only (`total_yes == total_no == 0`). Refunds `pool_deposited` to creator. |
+| `create_market(creator_wallet, pool_deposited, question, category, horizon_years, resolution_criteria, allowed_evidence_types)` | relayer-only write | Mirrors a confirmed `ChronixEscrow.fund(marketId, KIND_POOL, amount)` deposit on Base. Rejects `pool_deposited <= 0`. `horizon_years` in `{3, 5, 10, 0}` (0 = permanent). Returns new `market_id`. |
+| `stake(market_id, wallet, side, amount)` | relayer-only write | Mirrors a confirmed `ChronixEscrow.fund(marketId, KIND_YES\|KIND_NO, amount)` deposit on Base. |
+| `submit_evidence_pointer(market_id, source_type, url)` | write (any wallet) | Stores a pointer. Never trusted as fact — only `settle`'s own fetch is authoritative. No money involved, so this stays directly wallet-signed. |
+| `request_adjudication(market_id)` | write (any wallet / keeper) | Reverts unless `now >= resolves_at`, using a nondet-cross-validated time source (see below). On-chain enforced, not a backend cron. |
+| `settle(market_id)` | write (any wallet / keeper) | Fetches real evidence across news / academic / financial source categories, classifies each via LLM, and requires a basis-points agreement threshold (not strict equality) across leader/validators. Produces `YES`, `NO`, or `SPLIT`. |
+| `claim_payout(market_id, wallet)` | relayer-only write | Computes `wallet`'s payout for a settled market, zeroes its stake ledger, and returns the amount for the relayer to push onto `ChronixEscrow.setPayouts`. |
+| `claim_timeout_refund(market_id, wallet)` | relayer-only write | Backstop: if `settle` never completes within the grace window, computes `wallet`'s own-stake refund the same way. |
+| `cancel_market(market_id)` | relayer-only write | Pre-participation-only (`total_yes == total_no == 0`). Returns `pool_deposited` for the relayer to credit back to the creator via the escrow. |
 | `get_market(market_id)` | view | Full market snapshot as a dict. |
 | `get_market_count()` | view | Number of markets created. |
 | `get_stake(market_id, wallet)` | view | A wallet's YES/NO stake + claimed flag. |
 | `get_evidence(market_id, index)` / `get_all_evidence(market_id)` | view | Submitted evidence pointers. |
+| `get_relayer_address()` | view | The configured relayer wallet. |
 
-## Exit paths (money movement)
+## Exit paths (payout accounting — no money movement here)
 
-All five exit paths funnel through the single `_send_gen` helper, and all
-five follow the same ordering: **read ledger field(s) into locals → zero
-the ledger field(s) in storage → persist that write → only then transfer.**
-This is what prevents a second call (reentrant or simply repeated) from
-transferring twice: after zeroing, a repeat call reads `0` and reverts via
-`pure_validate_positive`.
+This contract moves no money at all — see the top-of-file architecture
+note. All three payout paths still follow the same ordering as before:
+**read ledger field(s) into locals → zero the ledger field(s) in storage →
+persist that write → only then return the authoritative amount** for the
+relayer to push onto `ChronixEscrow.setPayouts`. This is what prevents a
+second call (repeated by the relayer, e.g. after a crash mid-relay) from
+crediting the escrow twice: after zeroing, a repeat call reads `0` and
+reverts via `pure_validate_positive`. `ChronixEscrow.setPayouts` is itself
+idempotent per market_id (its own `payoutsSet` gate), so a relay retry
+after a partial failure is always safe to just call again.
 
 1. `claim_payout` — settle=YES: winners split principal + losers' pool +
    creator's liquidity pro-rata (`pure_compute_winner_payout`).
@@ -66,9 +81,9 @@ transferring twice: after zeroing, a repeat call reads `0` and reverts via
 3. `claim_payout` — settle=SPLIT: both sides get principal back plus a
    pro-rata share of the creator's liquidity (`pure_compute_split_payout`).
 4. `claim_timeout_refund` — adjudication requested but never completed
-   within the grace window; any staker reclaims their own stake only.
-5. `cancel_market` — creator reclaims `pool_deposited` before any stakes
-   exist.
+   within the grace window; any staker's own stake only.
+5. `cancel_market` — creator's `pool_deposited` refunded before any
+   stakes exist.
 
 ## Notable implementation choices / fallbacks
 
@@ -78,13 +93,10 @@ official `genlayer` CLI (v0.39.2, `genlayer new`), used to confirm exact
 call spellings (`gl.message.sender_address`, `gl.get_webpage(url, mode="text")`,
 `gl.exec_prompt(prompt)`, `TreeMap`, `@allow_storage @dataclass`).
 
-Two things were **not** confirmed in the crawlable docs reached during
-research, so this contract uses the documented fallback patterns
-specified in the build brief rather than guessing at unconfirmed syntax:
+One thing was **not** confirmed in the crawlable docs reached during
+research, so this contract uses the documented fallback pattern specified
+in the build brief rather than guessing at unconfirmed syntax:
 
-- **Native GEN transfer**: `_send_gen` uses a `@gl.evm.contract_interface`
-  shim (`_GenRecipient.emit_transfer(value=amount)`), the standard
-  documented GenVM value-transfer chokepoint pattern.
 - **Contract-visible time**: no deterministic on-chain clock primitive was
   confirmed, so `_now()` fetches a real UTC time API inside a
   nondeterministic block and requires leader/validator agreement within a
@@ -93,7 +105,7 @@ specified in the build brief rather than guessing at unconfirmed syntax:
   a deadline check *more* conservative — it never trusts a caller-supplied
   timestamp.
 
-Both are called out inline in `chronix.py` with full reasoning; there
+This is called out inline in `chronix.py` with full reasoning; there
 are no unresolved TODOs in the file.
 
 ## Testing

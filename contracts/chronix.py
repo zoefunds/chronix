@@ -370,9 +370,15 @@ class Market:
     status: str
 
     # --- LEDGER fields (money only; never conflate with terms above) ---
-    pool_deposited: u256  # creator's initial liquidity, in GEN wei
-    total_yes: u256       # sum of all YES stakes, in GEN wei
-    total_no: u256        # sum of all NO stakes, in GEN wei
+    # NOTE: these no longer represent value actually held by THIS contract.
+    # Real USDC lives in ChronixEscrow.sol on Base Sepolia
+    # (contracts/base/ChronixEscrow.sol); these fields are a mirror,
+    # written only by the trusted relayer once it has confirmed the
+    # matching USDC deposit on Base — see module docstring "Funding
+    # architecture" section. Units are USDC base units (6 decimals), not GEN wei.
+    pool_deposited: u256  # creator's initial liquidity, confirmed-deposited USDC
+    total_yes: u256       # sum of all YES stakes, confirmed-deposited USDC
+    total_no: u256        # sum of all NO stakes, confirmed-deposited USDC
 
     # --- adjudication bookkeeping ---
     adjudication_requested_at: u256  # 0 == never requested
@@ -388,10 +394,33 @@ class Chronix(gl.Contract):
     submit_evidence_pointer, request_adjudication, settle, claim_payout,
     claim_timeout_refund, cancel_market, plus read-only view methods for
     the backend/frontend to poll status without needing a write tx.
+
+    Funding architecture (changed from the original GEN-native design):
+    this contract holds NO money and never did a native value transfer
+    since this revision. All real funding — a market's initial liquidity,
+    every YES/NO stake, and every payout/refund — is real USDC custodied
+    by ChronixEscrow.sol on Base Sepolia (see contracts/base/). This
+    contract is the adjudication + ledger-of-record layer only:
+      - A user funds a market on Base (ChronixEscrow.fund) or claims a
+        payout there (ChronixEscrow.claim) directly, self-serve.
+      - The backend relayer (this contract's `relayer_address`) watches
+        confirmed Base deposits and mirrors them here via create_market /
+        stake, and watches this contract's settle()/claim_* outcomes to
+        push payout amounts back onto the escrow via setPayouts.
+    Because every write here now comes from the relayer rather than
+    directly from each user's own wallet (the escrow, not this contract,
+    verifies the user's signature/custody), every write method below
+    takes an explicit wallet/creator parameter instead of trusting
+    gl.message.sender_address as "the user", and is gated by
+    `_require_relayer`. This mirrors the trust model already used for
+    Base-Sepolia relaying in the meme-olympics/event-weaver reference
+    projects: the relayer is a convenience/bridge actor that can only
+    mirror facts already confirmed on Base, never fabricate them.
     """
 
     markets: TreeMap[u256, Market]
     market_counter: u256
+    relayer_address: Address
 
     # Stakes are stored OUTSIDE the Market dataclass, keyed by
     # "{market_id}:{wallet_hex}", so adding a stake never requires
@@ -416,17 +445,31 @@ class Chronix(gl.Contract):
     evidence_source_type: TreeMap[str, str]
     evidence_submitter: TreeMap[str, Address]
 
-    def __init__(self):
+    def __init__(self, relayer_address: str):
         """
-        GenVM storage fields default to their zero-equivalent (0 / "" /
-        empty map) automatically; no explicit initialization needed beyond
-        making the constructor a no-op, matching the documented pattern.
+        `relayer_address` is the backend service wallet authorized to
+        mirror confirmed Base Sepolia USDC activity onto this contract
+        (see class docstring "Funding architecture"). Deploy this contract
+        with the SAME address configured as ChronixEscrow.sol's
+        `relayer_` constructor argument on Base, so both sides trust the
+        one backend-held key.
         """
-        pass
+        self.relayer_address = Address(relayer_address)
 
     # ======================================================================
     # Internal helpers (gl-dependent)
     # ======================================================================
+
+    def _require_relayer(self) -> None:
+        """
+        Every write method in this contract is relayer-gated: the relayer
+        is the only party that can have actually confirmed a matching
+        USDC deposit/claim on Base Sepolia (see class docstring). This
+        replaces the old direct-wallet-signs-everything trust model from
+        when this contract itself escrowed GEN.
+        """
+        if gl.message.sender_address != self.relayer_address:
+            raise gl.vm.UserError("caller is not the configured relayer_address")
 
     def _require_market(self, market_id: u256) -> Market:
         """Fetch a market or revert; centralizes the "unknown market" check."""
@@ -507,38 +550,6 @@ class Chronix(gl.Contract):
 
         return int(gl.vm.run_nondet(fetch_epoch_seconds, validator_fn))
 
-    def _send_gen(self, to: Address, amount: u256) -> None:
-        """
-        SINGLE chokepoint for every outbound GEN transfer in this
-        contract. Every payout path in this file calls this method last,
-        after the relevant ledger field(s) have already been zeroed and
-        that zeroed state persisted — see the docstring on each payout
-        method for why that ordering is a deliberate security invariant,
-        not an accident:
-
-            1. read ledger field(s) into locals
-            2. zero the ledger field(s) in storage
-            3. (storage write is committed as part of this same call frame)
-            4. ONLY THEN call `_send_gen`
-
-        If step 4 happened before steps 1-3, a reentrant or duplicate call
-        into the same payout method could read the still-nonzero ledger
-        field again and drain the contract twice for one stake. Zeroing
-        first means a second call sees `amount <= 0` and reverts via
-        `pure_validate_positive` before any second transfer is attempted.
-
-        Implementation follows the documented GenVM fallback pattern for
-        native value transfer via an EVM-interface shim, since a more
-        specific "send GEN" primitive was not confirmed in the crawlable
-        docs reached during research.
-        """
-        if amount <= u256(0):
-            # Nothing to send; treat as a no-op rather than an error so
-            # callers that pass a legitimately-zero remainder don't revert.
-            return
-        recipient = _GenRecipient(to)
-        recipient.emit_transfer(value=amount)
-
     def _wallet_hex(self, addr: Address) -> str:
         return addr.as_hex
 
@@ -546,9 +557,11 @@ class Chronix(gl.Contract):
     # Public WRITE methods
     # ======================================================================
 
-    @gl.public.write.payable
+    @gl.public.write
     def create_market(
         self,
+        creator_wallet: str,
+        pool_deposited: u256,
         question: str,
         category: str,
         horizon_years: u256,
@@ -558,17 +571,19 @@ class Chronix(gl.Contract):
         """
         Create a new market and seed it with initial liquidity.
 
-        Payable: `gl.message.value` is read as the initial liquidity
-        deposit and stored in `pool_deposited` — a LEDGER field, kept
-        entirely separate from `resolution_criteria` (a TERMS field).
-        Any non-positive deposit is rejected; a market must always start
-        with real, positive escrowed value.
+        Relayer-only (see `_require_relayer`). `pool_deposited` is the
+        USDC amount the relayer has already confirmed `creator_wallet`
+        deposited into ChronixEscrow.fund(marketId, KIND_POOL, amount) on
+        Base Sepolia — this method only mirrors that fact, it moves no
+        money itself. Any non-positive deposit is rejected; a market must
+        always start with real, positive confirmed liquidity.
 
         Returns the new market's id.
         """
-        deposit = u256(gl.message.value)
+        self._require_relayer()
+        deposit = u256(pool_deposited)
         if deposit <= u256(0):
-            raise gl.vm.UserError("initial liquidity (gl.message.value) must be > 0")
+            raise gl.vm.UserError("pool_deposited must be > 0")
 
         # Validate horizon_years is one of the accepted codes before we do
         # any further work; pure_resolve_horizon_years raises ValueError
@@ -592,7 +607,7 @@ class Chronix(gl.Contract):
 
         market = Market(
             id=market_id,
-            creator=gl.message.sender_address,
+            creator=Address(creator_wallet),
             question=question,
             category=category,
             horizon_years=horizon_years,
@@ -611,16 +626,18 @@ class Chronix(gl.Contract):
         self.markets[market_id] = market
         return market_id
 
-    @gl.public.write.payable
-    def stake(self, market_id: u256, side: str) -> bool:
+    @gl.public.write
+    def stake(self, market_id: u256, wallet: str, side: str, amount: u256) -> bool:
         """
-        Place a stake on YES or NO for an active market.
+        Record a stake on YES or NO for an active market.
 
-        Payable: only `gl.message.value` is ever trusted as the staked
-        amount — any numeric "amount" parameter supplied by the caller
-        would be untrustworthy (the caller could lie about it), so this
-        method deliberately does not accept one at all.
+        Relayer-only (see `_require_relayer`). `amount` is the USDC sum
+        the relayer has already confirmed `wallet` deposited into
+        ChronixEscrow.fund(marketId, KIND_YES|KIND_NO, amount) on Base
+        Sepolia — this method only mirrors that confirmed fact into this
+        contract's ledger, it moves no money itself.
         """
+        self._require_relayer()
         market = self._require_market(market_id)
         now_ts = self._now()
 
@@ -632,11 +649,11 @@ class Chronix(gl.Contract):
         if side not in (SIDE_YES, SIDE_NO):
             raise gl.vm.UserError(f"side must be '{SIDE_YES}' or '{SIDE_NO}', got {side!r}")
 
-        amount = u256(gl.message.value)
+        amount = u256(amount)
         if amount <= u256(0):
-            raise gl.vm.UserError("stake amount (gl.message.value) must be > 0")
+            raise gl.vm.UserError("stake amount must be > 0")
 
-        wallet_hex = self._wallet_hex(gl.message.sender_address)
+        wallet_hex = self._wallet_hex(Address(wallet))
         key = pure_make_stake_key(int(market_id), wallet_hex)
 
         if side == SIDE_YES:
@@ -947,32 +964,40 @@ No other text, no markdown fences.
         return verdict
 
     @gl.public.write
-    def claim_payout(self, market_id: u256) -> u256:
+    def claim_payout(self, market_id: u256, wallet: str) -> u256:
         """
-        Claim this caller's payout after a market has settled (YES, NO,
-        or SPLIT). Safe to call exactly once per wallet per market: the
-        stake ledger fields are zeroed BEFORE any transfer, in this exact
-        order, which is the core reentrancy/double-spend invariant of
-        this whole contract:
+        Compute and record `wallet`'s payout after a market has settled
+        (YES, NO, or SPLIT). Relayer-only (see `_require_relayer`) — the
+        relayer calls this once it has verified a claim request came from
+        `wallet`, then pushes the returned amount onto
+        ChronixEscrow.setPayouts on Base Sepolia so the wallet can
+        self-serve `claim()` there. This method moves no money itself; it
+        is the authoritative payout-math ledger of record.
+
+        Safe to call exactly once per wallet per market: the stake ledger
+        fields are zeroed BEFORE this method returns, in this exact
+        order, which is the core double-spend invariant of this whole
+        contract:
 
             1. read stake_yes[key] / stake_no[key] into locals
             2. zero stake_yes[key] / stake_no[key] in storage
             3. (write committed as part of this call)
-            4. compute payout from the LOCAL copies, then call _send_gen
+            4. compute payout from the LOCAL copies and return it
 
         A second call after step 2 reads 0 for both stakes, and
         `pure_validate_positive` (invoked indirectly through the payout
         math paths below) causes it to revert instead of silently
-        no-op'ing or, worse, paying out again.
+        no-op'ing or, worse, crediting a duplicate payout on the escrow.
         """
+        self._require_relayer()
         market = self._require_market(market_id)
         if market.status not in (STATUS_SETTLED_YES, STATUS_SETTLED_NO, STATUS_SETTLED_SPLIT):
             raise gl.vm.UserError(
                 f"market {market_id} has not been settled yet (status={market.status})"
             )
 
-        wallet = gl.message.sender_address
-        wallet_hex = self._wallet_hex(wallet)
+        wallet_addr = Address(wallet)
+        wallet_hex = self._wallet_hex(wallet_addr)
         key = pure_make_stake_key(int(market_id), wallet_hex)
 
         if self.payout_claimed.get(key, False):
@@ -1005,21 +1030,25 @@ No other text, no markdown fences.
         if payout <= 0:
             raise gl.vm.UserError("computed payout is 0; nothing to claim (wrong side of a decisive verdict)")
 
-        # --- Step 4: transfer LAST, after ledger is already zeroed+saved ---
-        self._send_gen(wallet, u256(payout))
+        # --- Step 4: return the authoritative amount; the relayer pushes
+        # it onto ChronixEscrow.setPayouts on Base for self-serve claim ---
         return u256(payout)
 
     @gl.public.write
-    def claim_timeout_refund(self, market_id: u256) -> u256:
+    def claim_timeout_refund(self, market_id: u256, wallet: str) -> u256:
         """
         Backstop exit path: if adjudication was requested but `settle`
         never completed within ADJUDICATION_GRACE_SECONDS (e.g. because
         evidence sources are unreachable or consensus can't be reached),
-        any staker may reclaim their OWN stake — no one else's, and never
+        any staker's OWN stake may be refunded — no one else's, and never
         the creator's pool_deposited (that would let a single staker drain
-        funds belonging to the whole market). Same zero-before-transfer
-        ordering as claim_payout.
+        funds belonging to the whole market). Relayer-only (see
+        `_require_relayer`); moves no money itself — same as
+        claim_payout, the relayer pushes the returned amount onto
+        ChronixEscrow.setPayouts for `wallet` to self-serve claim on Base.
+        Same zero-before-return ordering as claim_payout.
         """
+        self._require_relayer()
         market = self._require_market(market_id)
         now_ts = self._now()
 
@@ -1031,8 +1060,8 @@ No other text, no markdown fences.
                 f"grace={ADJUDICATION_GRACE_SECONDS})"
             )
 
-        wallet = gl.message.sender_address
-        wallet_hex = self._wallet_hex(wallet)
+        wallet_addr = Address(wallet)
+        wallet_hex = self._wallet_hex(wallet_addr)
         key = pure_make_stake_key(int(market_id), wallet_hex)
 
         if self.payout_claimed.get(key, False):
@@ -1056,22 +1085,24 @@ No other text, no markdown fences.
             market.status = STATUS_REFUNDED_TIMEOUT
             self.markets[market_id] = market
 
-        # --- Step 4: transfer last ---
-        self._send_gen(wallet, u256(refund_amount))
+        # --- Step 4: return the authoritative amount for the relayer to
+        # push onto ChronixEscrow.setPayouts ---
         return u256(refund_amount)
 
     @gl.public.write
     def cancel_market(self, market_id: u256) -> u256:
         """
-        Creator-only cancellation, PRE-PARTICIPATION ONLY: legal only
+        Creator-initiated cancellation, PRE-PARTICIPATION ONLY: legal only
         while total_yes == total_no == 0, i.e. before anyone has staked.
-        Refunds pool_deposited to the creator. Same zero-before-transfer
+        Relayer-only (see `_require_relayer`) — the relayer calls this
+        once it has verified the cancellation request came from
+        `market.creator`, then pushes the returned pool_deposited amount
+        onto ChronixEscrow.setPayouts so the creator can self-serve claim
+        it back on Base. Moves no money itself. Same zero-before-return
         ordering as every other payout path in this file.
         """
+        self._require_relayer()
         market = self._require_market(market_id)
-
-        if gl.message.sender_address != market.creator:
-            raise gl.vm.UserError("only the market creator may cancel this market")
 
         if not pure_can_cancel(market.status, int(market.total_yes), int(market.total_no)):
             raise gl.vm.UserError(
@@ -1085,13 +1116,12 @@ No other text, no markdown fences.
         refund_amount = int(market.pool_deposited)
         pure_validate_positive(refund_amount, "pool_deposited")
 
-        # --- Step 2 + 3: zero the ledger field and persist BEFORE transfer ---
+        # --- Step 2 + 3: zero the ledger field and persist BEFORE return ---
         market.pool_deposited = u256(0)
         market.status = STATUS_CANCELLED
         self.markets[market_id] = market
 
-        # --- Step 4: transfer last ---
-        self._send_gen(market.creator, u256(refund_amount))
+        # --- Step 4: return the authoritative amount ---
         return u256(refund_amount)
 
     # ======================================================================
@@ -1165,23 +1195,7 @@ No other text, no markdown fences.
             )
         return out
 
-
-@gl.evm.contract_interface
-class _GenRecipient:
-    """
-    Thin EVM-interface shim used only by `_send_gen` to perform the actual
-    native GEN value transfer. `emit_transfer` is NOT hand-declared here —
-    it is injected automatically by the `@gl.evm.contract_interface`
-    decorator for any address-shaped interface stub with empty View/Write
-    inner classes, matching the confirmed working pattern (independently
-    verified against a real deployed GenLayer contract). All money leaves
-    this contract through exactly one call site (`Chronix._send_gen`),
-    which is what makes the zero-before-transfer ordering auditable in one
-    place.
-    """
-
-    class View:
-        pass
-
-    class Write:
-        pass
+    @gl.public.view
+    def get_relayer_address(self) -> str:
+        """Backend relayer wallet authorized to write to this contract (see class docstring)."""
+        return self.relayer_address.as_hex

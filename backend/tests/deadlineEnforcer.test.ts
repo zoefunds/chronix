@@ -19,7 +19,7 @@ vi.mock("../src/genlayer/client.js", async () => {
 
 import { applyMigrations, createTestPool, resetDatabase, seedTestUser } from "./helpers/db.js";
 import { genlayerClient } from "../src/genlayer/client.js";
-import { insertMarket, setMarketStatus, getMarketById } from "../src/db/repositories.js";
+import { insertMarket, setMarketStatus, setMarketContractId, getMarketById } from "../src/db/repositories.js";
 import { runDeadlineEnforcerOnce } from "../src/jobs/deadlineEnforcer.js";
 
 let pool: Pool;
@@ -71,7 +71,6 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // future
-      contractMarketId: "1",
     });
     await setMarketStatus(market.id, "open");
 
@@ -91,9 +90,9 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(), // already past by wall clock
-      contractMarketId: "2",
     });
     await setMarketStatus(market.id, "open");
+    await setMarketContractId(market.id, "2");
 
     vi.mocked(genlayerClient.getMarket).mockResolvedValue(
       baseChainMarket({ id: 2, status: "active", resolvesAt: Math.floor(Date.now() / 1000) + 3600 })
@@ -116,9 +115,9 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(),
-      contractMarketId: "3",
     });
     await setMarketStatus(market.id, "open");
+    await setMarketContractId(market.id, "3");
 
     vi.mocked(genlayerClient.getMarket).mockResolvedValue(
       baseChainMarket({ id: 3, status: "active", resolvesAt: Math.floor(Date.now() / 1000) - 60 })
@@ -140,9 +139,9 @@ describe("deadline enforcer — fail-closed transitions", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() - 60 * 1000).toISOString(),
-      contractMarketId: "4",
     });
     await setMarketStatus(market.id, "open");
+    await setMarketContractId(market.id, "4");
 
     vi.mocked(genlayerClient.getMarket).mockResolvedValue(
       baseChainMarket({ id: 4, status: "awaiting_adjudication" })

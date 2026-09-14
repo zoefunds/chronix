@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Label } from '../components/ui'
 import { useAuth } from '../lib/auth'
-import { api, ApiError } from '../lib/api'
-import { genlayer } from '../lib/genlayer'
-import type { Address } from 'genlayer-js/types'
+import { api } from '../lib/api'
+import { approveAndFund, usdcToBaseUnits, FUND_KIND_POOL } from '../lib/escrow'
+import type { Address } from 'viem'
 import type { CreateMarketPayload, EvidenceSourceType, Horizon, MarketCategory } from '../types'
 
 const categories: MarketCategory[] = ['politics', 'technology', 'culture', 'science', 'economics', 'geopolitics', 'sports', 'other']
@@ -13,7 +13,7 @@ const evidenceSourceOptions: EvidenceSourceType[] = ['news', 'academic', 'govern
 
 export default function CreateMarket() {
   const navigate = useNavigate()
-  const { wallet, token, clearSession } = useAuth()
+  const { wallet, token } = useAuth()
   const [form, setForm] = useState<CreateMarketPayload>({
     question: '',
     category: 'technology',
@@ -25,17 +25,12 @@ export default function CreateMarket() {
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [step, setStep] = useState<'idle' | 'signing' | 'recording'>('idle')
-  // Set once create_market lands on-chain. If the follow-up POST /markets
-  // (mirroring into Postgres) then fails, we must NOT let the user hit
-  // "Create Market" again — that would sign and pay for a second on-chain
-  // market. Instead we keep this around so "Retry recording" can just
-  // retry the mirror call against the already-confirmed transaction.
-  const [onChainResult, setOnChainResult] = useState<{
-    txHash: string
-    contractMarketId: number
-    resolvesAt: string
-  } | null>(null)
+  const [step, setStep] = useState<'idle' | 'creating' | 'approving' | 'funding'>('idle')
+  // Set once the pending-chain market row exists in Postgres. If funding on
+  // Base Sepolia then fails partway, we must NOT let the user hit "Create
+  // Market" again — that would create a second, orphaned pending row.
+  // Instead "Retry funding" resumes against this already-created market id.
+  const [pendingMarketId, setPendingMarketId] = useState<string | null>(null)
 
   function toggleSource(s: EvidenceSourceType) {
     setForm((f) => ({
@@ -46,54 +41,41 @@ export default function CreateMarket() {
     }))
   }
 
-  async function recordOnChainResult(result: { txHash: string; contractMarketId: number; resolvesAt: string }) {
-    if (!token) {
-      setError(
-        'Your session expired while the transaction was confirming on-chain. Sign in again, then press "Retry recording" — the market is already live on-chain and will not be created twice.'
-      )
-      setOnChainResult(result)
-      return
-    }
-    setStep('recording')
+  async function fundPendingMarket(marketId: string) {
+    if (!wallet) return
     try {
-      await api.createMarket(
-        {
-          question: form.question,
-          category: form.category,
-          horizonYears: form.horizonYears,
-          resolutionCriteria: form.resolutionCriteria,
-          allowedEvidenceSources: form.allowedEvidenceSources,
-          initialLiquidity: form.initialLiquidity,
-        },
-        { contractMarketId: String(result.contractMarketId), txHash: result.txHash, resolvesAt: result.resolvesAt },
-        token
-      )
-      setOnChainResult(null)
+      const escrowInfo = await api.getMarketEscrow(marketId)
+      if (!escrowInfo.escrowAddress) {
+        setError('The Base Sepolia escrow contract is not configured on the backend yet. Try again later.')
+        setPendingMarketId(marketId)
+        return
+      }
+
+      setStep('approving')
+      await approveAndFund({
+        account: wallet as Address,
+        escrowAddress: escrowInfo.escrowAddress as Address,
+        usdcAddress: escrowInfo.usdcAddress as Address,
+        marketIdBytes32: escrowInfo.marketIdBytes32,
+        kind: FUND_KIND_POOL,
+        amountBaseUnits: usdcToBaseUnits(form.initialLiquidity),
+      })
+      setStep('funding')
+
+      setPendingMarketId(null)
       setSubmitted(true)
       setTimeout(() => navigate('/discover'), 900)
     } catch (err) {
-      // The on-chain write already succeeded — never treat this as "failed
-      // to create market" (that would invite a second, paid resubmission).
-      // A background chain-indexer pass on the backend will also pick this
-      // market up on its own within ~15s even if the user never retries.
-      setOnChainResult(result)
-      if (err instanceof ApiError && err.status === 401) {
-        // The stored session token is stale (expired, or invalidated by a
-        // backend redeploy) but the AuthProvider has no way to detect that
-        // client-side — it just trusts whatever is in localStorage. Clear it
-        // now so the UI stops claiming the wallet is signed in and the user
-        // can re-sign without losing the on-chain result above.
-        clearSession()
-        setError(
-          'Your session expired, so this market could not be saved to Chronix\'s index (it is still live on-chain). Sign in again, then press "Retry recording".'
-        )
-      } else {
-        setError(
-          `Your market is live on-chain, but saving it to Chronix's index failed: ${
-            err instanceof Error ? err.message : 'unknown error'
-          }. It will appear automatically within a minute, or press "Retry recording".`
-        )
-      }
+      // The pending-chain row already exists — never treat this as "failed
+      // to create market" (that would invite a duplicate submission). The
+      // backend relay job also mirrors the deposit automatically once it
+      // lands, even if the user never retries.
+      setPendingMarketId(marketId)
+      setError(
+        `Your market was created, but funding it with USDC on Base Sepolia failed: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }. Press "Retry funding" once your wallet is ready.`
+      )
     } finally {
       setStep('idle')
     }
@@ -101,9 +83,9 @@ export default function CreateMarket() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (onChainResult) {
+    if (pendingMarketId) {
       setSubmitting(true)
-      await recordOnChainResult(onChainResult)
+      await fundPendingMarket(pendingMarketId)
       setSubmitting(false)
       return
     }
@@ -114,27 +96,20 @@ export default function CreateMarket() {
     setError(null)
     setSubmitting(true)
     try {
-      // Step 1: the user's OWN wallet signs and submits create_market
-      // directly to GenLayer — the backend never holds a key that could do
-      // this on their behalf (see backend/src/genlayer/client.ts).
-      setStep('signing')
+      // Step 1: create the 'pending_chain' row in Postgres — no chain write
+      // yet, just gets us a market id to derive the escrow's bytes32 key.
+      setStep('creating')
       const resolvesAt = new Date(
         Date.now() +
           (form.horizonYears === 'permanent' ? 100 : form.horizonYears) * 365 * 24 * 60 * 60 * 1000
       ).toISOString()
 
-      const { txHash, contractMarketId } = await genlayer.createMarket(wallet as Address, {
-        question: form.question,
-        category: form.category,
-        horizonYears: form.horizonYears === 'permanent' ? 0 : form.horizonYears,
-        resolutionCriteria: form.resolutionCriteria,
-        allowedEvidenceTypes: form.allowedEvidenceSources.join(','),
-        initialLiquidityGen: String(form.initialLiquidity),
-      })
+      const market = await api.createMarket(form, resolvesAt, token)
 
-      // Step 2: mirror the now-confirmed on-chain market into Postgres so
-      // it shows up in fast reads (Discover, search) without polling chain.
-      await recordOnChainResult({ txHash, contractMarketId, resolvesAt })
+      // Step 2: the user's OWN wallet approves + funds USDC directly on
+      // Base Sepolia (see src/lib/escrow.ts) — the backend relayer then
+      // mirrors this confirmed deposit onto GenLayer automatically.
+      await fundPendingMarket(market.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create market.')
     } finally {
@@ -232,10 +207,11 @@ export default function CreateMarket() {
           </div>
 
           <label className="flex flex-col gap-1">
-            <Label>Initial liquidity (GEN)</Label>
+            <Label>Initial liquidity (USDC)</Label>
             <input
               type="number"
               min={1}
+              step="0.01"
               required
               value={form.initialLiquidity}
               onChange={(e) => setForm((f) => ({ ...f, initialLiquidity: Number(e.target.value) }))}
@@ -254,13 +230,15 @@ export default function CreateMarket() {
         <Button type="submit" variant="secondary" disabled={submitting || submitted}>
           {submitted
             ? 'Market created ✓'
-            : step === 'signing'
-              ? 'Confirm in wallet…'
-              : step === 'recording'
-                ? 'Recording…'
-                : onChainResult
-                  ? 'Retry recording'
-                  : 'Create Market'}
+            : step === 'creating'
+              ? 'Creating…'
+              : step === 'approving'
+                ? 'Approve USDC in wallet…'
+                : step === 'funding'
+                  ? 'Confirm funding in wallet…'
+                  : pendingMarketId
+                    ? 'Retry funding'
+                    : 'Create Market'}
         </Button>
       </form>
     </div>

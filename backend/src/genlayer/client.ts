@@ -5,20 +5,18 @@
  * (contracts/chronix.py), deployed at CONTRACT_ADDRESS on GenLayer
  * Studio/StudioNet — see MEMORY.md for the deployed address.
  *
- * Trust model (read before adding a call here):
- *   - Money-moving methods (create_market, stake, claim_payout,
- *     claim_timeout_refund, cancel_market) are ALWAYS signed by the end
- *     user's own wallet, in the browser, via the frontend's genlayer-js
- *     client — never here. This backend never holds a key that could move
- *     user funds.
- *   - This wrapper is used for: (a) read-only polling (getMarket, getStake,
- *     getAllEvidence) so the API/DB can stay in sync without a wallet, and
- *     (b) the keeper account (see genlayer/keeper.ts), which ONLY calls the
- *     non-payable, fully-permissionless state-advancing methods
- *     (request_adjudication, settle) once their on-chain preconditions are
- *     already true — it is a convenience automation, not a privileged actor;
- *     any user's wallet could call the exact same methods with the same
- *     effect.
+ * Trust model (read before adding a call here) — CHANGED from the original
+ * GEN-native design: this contract now moves no money at all (real USDC
+ * lives in ChronixEscrow.sol on Base Sepolia — see services/baseSepolia.ts
+ * and chronix.py's class docstring). Every write method on the contract is
+ * relayer-gated, so every write call in this file uses the SAME relayer
+ * account (RELAYER_PRIVATE_KEY) — there is no separate "user wallet signs
+ * directly" path any more, and no separate "keeper" identity either: one
+ * backend-held key both advances permissionless state
+ * (request_adjudication, settle) and mirrors Base-confirmed funding/payout
+ * events (create_market, stake, claim_payout, claim_timeout_refund,
+ * cancel_market). This backend still never custodies user funds — it only
+ * ever mirrors facts the escrow contract has already confirmed on Base.
  */
 import { createClient, chains, createAccount } from "genlayer-js";
 import type { Address, Hash } from "genlayer-js/types";
@@ -46,19 +44,19 @@ function getReadClient(): GLClient {
   return readClient;
 }
 
-/** Keeper client: only constructed if GENLAYER_KEEPER_PRIVATE_KEY is set. See trust model above. */
-let keeperClient: GLClient | null = null;
+/** Relayer client: only constructed if RELAYER_PRIVATE_KEY is set. See trust model above. */
+let relayerClient: GLClient | null = null;
 
-export function getKeeperClient(): GLClient | null {
-  if (!env.GENLAYER_KEEPER_PRIVATE_KEY || !env.CONTRACT_ADDRESS) return null;
-  if (keeperClient) return keeperClient;
-  const account = createAccount(env.GENLAYER_KEEPER_PRIVATE_KEY as `0x${string}`);
-  keeperClient = createClient({
+export function getRelayerClient(): GLClient | null {
+  if (!env.RELAYER_PRIVATE_KEY || !env.CONTRACT_ADDRESS) return null;
+  if (relayerClient) return relayerClient;
+  const account = createAccount(env.RELAYER_PRIVATE_KEY as `0x${string}`);
+  relayerClient = createClient({
     chain: chains.studionet,
     endpoint: env.GENLAYER_RPC_URL,
     account,
   });
-  return keeperClient;
+  return relayerClient;
 }
 
 export interface ChainMarket {
@@ -164,15 +162,15 @@ export const genlayerClient = {
   },
 
   /**
-   * Keeper-only: advances a market past its deadline. Non-payable,
-   * permissionless on-chain (the contract itself re-checks now >= resolves_at
-   * and reverts if called early — this call is never trusted to be correct,
-   * only convenient). No-ops with a warning if no keeper key is configured.
+   * Advances a market past its deadline. Non-payable, permissionless
+   * on-chain (the contract itself re-checks now >= resolves_at and reverts
+   * if called early — this call is never trusted to be correct, only
+   * convenient). No-ops with a warning if no relayer key is configured.
    */
   async requestAdjudication(contractMarketId: number): Promise<{ txHash: string } | null> {
-    const client = getKeeperClient();
+    const client = getRelayerClient();
     if (!client) {
-      logger.warn("GENLAYER_KEEPER_PRIVATE_KEY not set; skipping automated request_adjudication");
+      logger.warn("RELAYER_PRIVATE_KEY not set; skipping automated request_adjudication");
       return null;
     }
     const hash = await client.writeContract({
@@ -185,14 +183,14 @@ export const genlayerClient = {
   },
 
   /**
-   * Keeper-only: triggers settle() once a market is awaiting_adjudication.
-   * Non-payable; the contract's own nondet consensus determines the
-   * verdict, this call just initiates it. See trust model at top of file.
+   * Triggers settle() once a market is awaiting_adjudication. Non-payable;
+   * the contract's own nondet consensus determines the verdict, this call
+   * just initiates it. See trust model at top of file.
    */
   async settle(contractMarketId: number): Promise<{ txHash: string } | null> {
-    const client = getKeeperClient();
+    const client = getRelayerClient();
     if (!client) {
-      logger.warn("GENLAYER_KEEPER_PRIVATE_KEY not set; skipping automated settle");
+      logger.warn("RELAYER_PRIVATE_KEY not set; skipping automated settle");
       return null;
     }
     const hash = await client.writeContract({
@@ -202,6 +200,115 @@ export const genlayerClient = {
       value: 0n,
     });
     return { txHash: hash as unknown as string };
+  },
+
+  /**
+   * Relayer-only: mirrors a confirmed ChronixEscrow.fund(marketId,
+   * KIND_POOL, amount) deposit onto GenLayer. `amount` is in USDC base
+   * units (6 decimals). Returns the new on-chain contract_market_id.
+   */
+  async createMarket(params: {
+    creatorWallet: string;
+    poolDeposited: string;
+    question: string;
+    category: string;
+    horizonYears: number;
+    resolutionCriteria: string;
+    allowedEvidenceTypes: string;
+  }): Promise<{ txHash: string; contractMarketId: number }> {
+    const client = getRelayerClient();
+    if (!client) throw new Error("RELAYER_PRIVATE_KEY not set; cannot relay create_market");
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "create_market",
+      args: [
+        params.creatorWallet,
+        params.poolDeposited,
+        params.question,
+        params.category,
+        params.horizonYears,
+        params.resolutionCriteria,
+        params.allowedEvidenceTypes,
+      ],
+      value: 0n,
+    });
+    await genlayerClient.waitForReceipt(hash as unknown as string);
+    const contractMarketId = (await genlayerClient.getMarketCount()) - 1;
+    return { txHash: hash as unknown as string, contractMarketId };
+  },
+
+  /** Relayer-only: mirrors a confirmed ChronixEscrow.fund(marketId, KIND_YES|KIND_NO, amount) deposit. */
+  async stake(params: {
+    contractMarketId: number;
+    wallet: string;
+    side: "yes" | "no";
+    amount: string;
+  }): Promise<{ txHash: string }> {
+    const client = getRelayerClient();
+    if (!client) throw new Error("RELAYER_PRIVATE_KEY not set; cannot relay stake");
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "stake",
+      args: [params.contractMarketId, params.wallet, params.side.toUpperCase(), params.amount],
+      value: 0n,
+    });
+    return { txHash: hash as unknown as string };
+  },
+
+  // NOTE: `claimPayout` / `claimTimeoutRefund` / `cancelMarket` below read
+  // the method's u256 return value off the tx receipt via a best-effort
+  // `.result` field. This has NOT been confirmed against a real genlayer-js
+  // receipt shape for a *write* call (only getTransactionTrace's
+  // debugTraceTransaction return_data was confirmed in this codebase) — the
+  // real field may be named differently or live under decoded event/trace
+  // data instead. Verify against a real settle()+claim flow on
+  // GenLayer Studio before trusting this in production; if `.result` is
+  // wrong, `getTransactionTrace(txHash).returnData` is the confirmed
+  // fallback for reading a write method's return value.
+
+  /** Relayer-only: computes + zeroes wallet's payout ledger, returns the amount to relay onto the escrow. */
+  async claimPayout(contractMarketId: number, wallet: string): Promise<{ txHash: string; amount: string }> {
+    const client = getRelayerClient();
+    if (!client) throw new Error("RELAYER_PRIVATE_KEY not set; cannot relay claim_payout");
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "claim_payout",
+      args: [contractMarketId, wallet],
+      value: 0n,
+    });
+    const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
+    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    return { txHash: hash as unknown as string, amount };
+  },
+
+  /** Relayer-only: same as claimPayout, for the timeout-refund backstop path. */
+  async claimTimeoutRefund(contractMarketId: number, wallet: string): Promise<{ txHash: string; amount: string }> {
+    const client = getRelayerClient();
+    if (!client) throw new Error("RELAYER_PRIVATE_KEY not set; cannot relay claim_timeout_refund");
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "claim_timeout_refund",
+      args: [contractMarketId, wallet],
+      value: 0n,
+    });
+    const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
+    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    return { txHash: hash as unknown as string, amount };
+  },
+
+  /** Relayer-only: creator-requested pre-participation cancellation. Returns pool_deposited to relay back. */
+  async cancelMarket(contractMarketId: number): Promise<{ txHash: string; amount: string }> {
+    const client = getRelayerClient();
+    if (!client) throw new Error("RELAYER_PRIVATE_KEY not set; cannot relay cancel_market");
+    const hash = await client.writeContract({
+      address: env.CONTRACT_ADDRESS as Address,
+      functionName: "cancel_market",
+      args: [contractMarketId],
+      value: 0n,
+    });
+    const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
+    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    return { txHash: hash as unknown as string, amount };
   },
 
   async waitForReceipt(txHash: string) {

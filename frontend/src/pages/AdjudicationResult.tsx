@@ -3,9 +3,9 @@ import { useParams, Link } from 'react-router-dom'
 import { Button, Card, EvidenceChip, Label } from '../components/ui'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
-import { genlayer } from '../lib/genlayer'
-import { formatGen } from '../lib/format'
-import type { Address } from 'genlayer-js/types'
+import { claim as claimFromEscrow } from '../lib/escrow'
+import { formatUsdc } from '../lib/format'
+import type { Address } from 'viem'
 import type { AdjudicationStatus, Evidence, Market, MarketEvent } from '../types'
 
 type Trace = {
@@ -72,16 +72,21 @@ export default function AdjudicationResultPage() {
   }, [id])
 
   async function handleClaim() {
-    if (!wallet || !market?.contract_market_id) return
+    if (!wallet || !market) return
     setClaiming(true)
     setClaimError(null)
     try {
-      const contractMarketId = Number(market.contract_market_id)
-      if (market.status === 'cancelled') {
-        await genlayer.claimTimeoutRefund(wallet as Address, contractMarketId)
-      } else {
-        await genlayer.claimPayout(wallet as Address, contractMarketId)
+      // Self-serve claim directly against ChronixEscrow on Base Sepolia —
+      // no GenLayer transaction needed (see backend/src/jobs/baseRelay.ts).
+      const escrowInfo = await api.getMarketEscrow(market.id)
+      if (!escrowInfo.escrowAddress) {
+        throw new Error('The Base Sepolia escrow contract is not configured on the backend yet.')
       }
+      await claimFromEscrow({
+        account: wallet as Address,
+        escrowAddress: escrowInfo.escrowAddress as Address,
+        marketIdBytes32: escrowInfo.marketIdBytes32,
+      })
       setClaimed(true)
     } catch (err) {
       setClaimError(err instanceof Error ? err.message : 'Claim failed — the contract rejected this call.')
@@ -245,7 +250,7 @@ export default function AdjudicationResultPage() {
         <div>
           <Label>Pool</Label>
           <div className="font-headline text-headline-lg text-primary">
-            {formatGen((BigInt(market.pool_deposited_wei || '0') + BigInt(market.total_yes_wei || '0') + BigInt(market.total_no_wei || '0')).toString())} GEN
+            {formatUsdc((BigInt(market.pool_deposited_wei || '0') + BigInt(market.total_yes_wei || '0') + BigInt(market.total_no_wei || '0')).toString())} USDC
           </div>
         </div>
         {claimError && <p className="text-body-sm text-error">{claimError}</p>}

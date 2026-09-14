@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Label } from '../components/ui'
 import { api } from '../lib/api'
-import { formatGen } from '../lib/format'
+import { formatUsdc } from '../lib/format'
 import type { Market } from '../types'
 
 const steps = [
@@ -20,7 +20,7 @@ const steps = [
   },
   {
     title: '4. Settle',
-    body: 'A verdict is reached — YES, NO, or undetermined — and escrowed GEN is released on-chain to the correct side, in full, automatically.',
+    body: 'A verdict is reached — YES, NO, or undetermined — and escrowed USDC is released on Base Sepolia to the correct side, in full, automatically.',
   },
 ]
 
@@ -61,7 +61,7 @@ export default function Landing() {
     : '0'
 
   const stats = [
-    { label: 'Total Value Staked', value: `${formatGen(totalStakedWei.toString())} GEN` },
+    { label: 'Total Value Staked', value: `${formatUsdc(totalStakedWei.toString())} USDC` },
     { label: 'Markets Live', value: String(markets.length) },
     { label: 'Adjudications Settled', value: String(settledCount) },
     { label: 'Avg. Horizon', value: `${avgHorizonYears} yrs` },
@@ -148,7 +148,7 @@ export default function Landing() {
                   <Label>{m.category}</Label>
                   <p className="font-headline text-headline-md text-primary leading-snug">{m.question}</p>
                   <div className="flex justify-between text-label-md font-label text-on-surface-variant">
-                    <span>{formatGen(stakedWei)} GEN staked</span>
+                    <span>{formatUsdc(stakedWei)} USDC staked</span>
                     <span>{m.participant_count ?? 0} participants</span>
                   </div>
                 </Card>

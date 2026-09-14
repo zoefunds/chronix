@@ -17,12 +17,15 @@ import {
   listEventsForMarket,
   listMarkets,
   listPositionsForMarket,
+  requestMarketCancellation,
 } from "../db/repositories.js";
 import { withTransaction } from "../db/pool.js";
 import { cacheGetOrSet } from "../lib/cache.js";
 import { env } from "../config.js";
 import { genlayerClient } from "../genlayer/client.js";
 import { runChainIndexerOnce } from "../jobs/chainIndexer.js";
+import { marketIdToBytes32, getEscrowClaimable } from "../services/baseSepolia.js";
+import { FUND_KIND_POOL, FUND_KIND_YES, FUND_KIND_NO } from "../lib/escrowAbi.js";
 
 export async function marketsRoutes(fastify: FastifyInstance) {
   // GET /evidence — global feed across every market, newest first. Powers
@@ -72,12 +75,15 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     return reply.send(result);
   });
 
-  // POST /markets — records a market AFTER the user's own wallet has already
-  // signed and submitted create_market directly to GenLayer. This backend
-  // never holds a key capable of moving a user's GEN, so it cannot submit
-  // that write itself — see genlayer/client.ts's trust-model docstring. The
-  // chain indexer job independently re-reads get_market() on a schedule, so
-  // even if this call is skipped or lies about details, chain truth wins.
+  // POST /markets — creates a 'pending_chain' row BEFORE any chain write.
+  // Funding moved to real USDC on Base Sepolia (ChronixEscrow.sol): the
+  // frontend derives this row's escrow bytes32 key from its id
+  // (services/baseSepolia.ts marketIdToBytes32) and calls
+  // ChronixEscrow.fund(marketId, KIND_POOL, amount) directly with the
+  // user's own wallet. The relay job (jobs/baseRelay.ts) watches for that
+  // confirmed deposit and mirrors it onto GenLayer's create_market, at
+  // which point this row flips to 'open' with a real contract_market_id —
+  // see jobs/baseRelay.ts and db/repositories.ts markMarketPoolRelayed.
   fastify.post(
     "/markets",
     { preHandler: [fastify.authenticate], config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
@@ -93,18 +99,11 @@ export async function marketsRoutes(fastify: FastifyInstance) {
           resolutionCriteria: body.resolutionCriteria,
           createdBy: wallet,
           resolvesAt: body.resolvesAt,
-          contractMarketId: body.contractMarketId,
           allowedEvidenceTypes: body.allowedEvidenceSources?.join(",") ?? null,
         });
 
         await insertMarketEvent(
-          {
-            marketId: inserted.id,
-            type: "created",
-            payload: { contractMarketId: body.contractMarketId },
-            chainTxHash: body.txHash,
-            confirmed: true,
-          },
+          { marketId: inserted.id, type: "created", payload: { pendingFunding: true }, confirmed: false },
           client
         );
 
@@ -134,9 +133,11 @@ export async function marketsRoutes(fastify: FastifyInstance) {
     return reply.send({ positions });
   });
 
-  // POST /markets/:id/positions — records a stake AFTER the user's own
-  // wallet already called the payable `stake` method directly on GenLayer
-  // (same trust-model pattern as POST /markets — see its docstring).
+  // POST /markets/:id/positions — creates a pending position row BEFORE the
+  // user funds ChronixEscrow.fund(marketId, KIND_YES|KIND_NO, amount) on
+  // Base Sepolia (same pending-first pattern as POST /markets — see its
+  // docstring). The relay job mirrors the confirmed deposit onto GenLayer's
+  // `stake` and sets relayed_at once done.
   fastify.post(
     "/markets/:id/positions",
     { preHandler: [fastify.authenticate], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
@@ -158,13 +159,7 @@ export async function marketsRoutes(fastify: FastifyInstance) {
         });
 
         await insertMarketEvent(
-          {
-            marketId: id,
-            type: "stake_recorded",
-            payload: { side: body.side, shares: body.shares },
-            chainTxHash: body.txHash,
-            confirmed: true,
-          },
+          { marketId: id, type: "stake_recorded", payload: { side: body.side, shares: body.shares, pendingFunding: true }, confirmed: false },
           client
         );
 
@@ -172,6 +167,84 @@ export async function marketsRoutes(fastify: FastifyInstance) {
       });
 
       return reply.code(201).send({ position });
+    }
+  );
+
+  // GET /markets/:id/escrow — funding target info for the frontend's
+  // ChronixEscrow.fund() calls on Base Sepolia: the escrow contract
+  // address, USDC token address, and this market's bytes32 key (derived
+  // deterministically from its UUID — same derivation the relay job uses).
+  fastify.get("/markets/:id/escrow", async (request, reply) => {
+    const { id } = marketIdParamSchema.parse(request.params);
+    const market = await getMarketById(id);
+    if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+    return reply.send({
+      escrowAddress: env.CHRONIX_ESCROW_ADDRESS || null,
+      usdcAddress: env.BASE_SEPOLIA_USDC_ADDRESS,
+      chainId: env.BASE_SEPOLIA_CHAIN_ID,
+      marketIdBytes32: marketIdToBytes32(id),
+      kinds: { pool: FUND_KIND_POOL, yes: FUND_KIND_YES, no: FUND_KIND_NO },
+    });
+  });
+
+  // GET /markets/:id/claimable/:wallet — how much USDC a wallet can claim
+  // for this market directly from ChronixEscrow.claim() — read straight
+  // from the escrow contract, never cached, since this drives a "Claim"
+  // button's enabled state and amount.
+  fastify.get("/markets/:id/claimable/:wallet", async (request, reply) => {
+    const { id } = marketIdParamSchema.parse(request.params);
+    const { wallet } = request.params as { wallet: string };
+    const market = await getMarketById(id);
+    if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+    if (!env.CHRONIX_ESCROW_ADDRESS) return reply.send({ claimable: "0" });
+    const claimable = await getEscrowClaimable(id, wallet);
+    return reply.send({ claimable });
+  });
+
+  // POST /markets/:id/cancel-request — creator-only, pre-participation-only
+  // (total_yes/total_no == 0), matching the contract's own pure_can_cancel
+  // guard. cancel_market is relayer-gated on GenLayer now (see
+  // contracts/chronix.py's class docstring), so the creator's own wallet
+  // can't call it directly any more — this records the request instead.
+  // If the market never made it past 'pending_chain', nothing is on-chain
+  // yet, so it's cancelled immediately; otherwise the relay job
+  // (jobs/baseRelay.ts findMarketsPendingCancelRelay) drives the actual
+  // cancel_market call + escrow refund on its next pass.
+  fastify.post(
+    "/markets/:id/cancel-request",
+    { preHandler: [fastify.authenticate], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const { id } = marketIdParamSchema.parse(request.params);
+      const wallet = request.walletAddress!;
+
+      const market = await getMarketById(id);
+      if (!market) return reply.code(404).send({ error: "not_found", message: "Market not found" });
+      if (market.created_by.toLowerCase() !== wallet.toLowerCase()) {
+        return reply.code(403).send({ error: "forbidden", message: "Only the market creator may cancel this market" });
+      }
+      if (market.status !== "pending_chain" && market.status !== "open") {
+        return reply
+          .code(409)
+          .send({ error: "invalid_status", message: `Market cannot be cancelled from status '${market.status}'` });
+      }
+      if (BigInt(market.total_yes_wei) > 0n || BigInt(market.total_no_wei) > 0n) {
+        return reply.code(409).send({
+          error: "already_staked",
+          message: "Market can only be cancelled before any stakes are placed",
+        });
+      }
+      if (market.cancel_requested_at) {
+        return reply.send({ market }); // idempotent — already requested
+      }
+
+      const updated = await requestMarketCancellation(id);
+      await insertMarketEvent({
+        marketId: id,
+        type: "reconciled",
+        payload: { cancelRequested: true, immediate: updated.status === "cancelled" },
+        confirmed: updated.status === "cancelled",
+      });
+      return reply.send({ market: updated });
     }
   );
 

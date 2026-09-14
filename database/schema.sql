@@ -160,3 +160,20 @@ CREATE TRIGGER trg_chain_sync_queue_updated_at
     EXECUTE FUNCTION set_updated_at();
 
 COMMIT;
+
+-- 008_base_sepolia_usdc_funding.sql
+ALTER TABLE markets ADD COLUMN IF NOT EXISTS pool_fund_tx_hash TEXT;
+ALTER TABLE markets ADD COLUMN IF NOT EXISTS pool_relayed_at TIMESTAMPTZ;
+ALTER TABLE markets ADD COLUMN IF NOT EXISTS payouts_relayed_at TIMESTAMPTZ;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS fund_tx_hash TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS relayed_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS base_relay_watermark (
+    id                SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    last_scanned_block NUMERIC(78, 0) NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO base_relay_watermark (id, last_scanned_block) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+
+-- 009_market_cancel_request.sql
+ALTER TABLE markets ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;

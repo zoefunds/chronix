@@ -34,6 +34,9 @@ export interface MarketRow {
   // no restriction — matches the contract's own treatment of an unset
   // allow-list (see pure_is_allowed_source_type in contracts/chronix.py).
   allowed_evidence_types: string | null;
+  // Set once a creator requests pre-participation cancellation — see
+  // requestMarketCancellation and jobs/baseRelay.ts findMarketsPendingCancelRelay.
+  cancel_requested_at: string | null;
   // Only present on listMarkets/getMarketById responses (LEFT JOIN count).
   participant_count?: string;
 }
@@ -118,21 +121,24 @@ export async function insertMarket(params: {
   resolutionCriteria: string;
   createdBy: string;
   resolvesAt: string;
-  /**
-   * The on-chain market id, already assigned by a successful create_market
-   * call the USER's own wallet submitted directly to GenLayer (never the
-   * backend). This route only ever records what already happened on-chain
-   * — see routes/markets.ts POST /markets docstring.
-   */
-  contractMarketId: string;
-  /** Comma-separated, matching what was sent on-chain to create_market. */
+  /** Comma-separated, will be mirrored on-chain to create_market once funded. */
   allowedEvidenceTypes?: string | null;
 }): Promise<MarketRow> {
+  /**
+   * Created as 'pending_chain' with no contract_market_id — the caller's
+   * wallet has NOT yet funded this market on Base Sepolia. The frontend
+   * derives the escrow's bytes32 key from this row's id (see
+   * services/baseSepolia.ts marketIdToBytes32) and calls
+   * ChronixEscrow.fund(marketId, KIND_POOL, amount) directly; the relay job
+   * (jobs/baseRelay.ts) then mirrors the confirmed deposit onto GenLayer's
+   * create_market and flips this row to 'open' with a real
+   * contract_market_id. See routes/markets.ts POST /markets docstring.
+   */
   const res = await query<MarketRow>(
     `INSERT INTO markets
        (question, category, horizon_years, resolution_criteria, created_by, status, resolves_at,
-        contract_market_id, allowed_evidence_types)
-     VALUES ($1, $2, $3, $4, $5, 'open', $6, $7, $8)
+        allowed_evidence_types)
+     VALUES ($1, $2, $3, $4, $5, 'pending_chain', $6, $7)
      RETURNING *`,
     [
       params.question,
@@ -141,7 +147,6 @@ export async function insertMarket(params: {
       params.resolutionCriteria,
       params.createdBy,
       params.resolvesAt,
-      params.contractMarketId,
       params.allowedEvidenceTypes ?? null,
     ]
   );
@@ -631,4 +636,123 @@ export async function markChainSyncFailed(id: string, error: string): Promise<vo
 export async function getChainSyncJob(id: string): Promise<ChainSyncQueueRow | null> {
   const res = await query<ChainSyncQueueRow>(`SELECT * FROM chain_sync_queue WHERE id = $1`, [id]);
   return res.rows[0] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Base Sepolia funding relay (see jobs/baseRelay.ts) — bridges confirmed
+// ChronixEscrow deposits <-> GenLayer's now-money-free ledger, and settled
+// GenLayer payouts back onto the escrow.
+// ---------------------------------------------------------------------------
+
+/** Markets awaiting their initial-liquidity deposit to be confirmed on Base and mirrored onto GenLayer. */
+export async function findMarketsPendingPoolRelay(limit = 50): Promise<MarketRow[]> {
+  const res = await query<MarketRow>(
+    `SELECT * FROM markets WHERE status = 'pending_chain' AND pool_relayed_at IS NULL
+     ORDER BY created_at ASC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+/** Positions awaiting their stake deposit to be confirmed on Base and mirrored onto GenLayer. */
+export async function findPositionsPendingRelay(limit = 100): Promise<PositionRow[]> {
+  const res = await query<PositionRow>(
+    `SELECT * FROM positions WHERE relayed_at IS NULL ORDER BY created_at ASC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+export async function markMarketPoolRelayed(
+  marketId: string,
+  params: { contractMarketId: string; fundTxHash: string },
+  client?: PoolClient
+): Promise<void> {
+  const runner = client ?? pool;
+  await runner.query(
+    `UPDATE markets SET status = 'open', contract_market_id = $2, pool_fund_tx_hash = $3, pool_relayed_at = now()
+     WHERE id = $1`,
+    [marketId, params.contractMarketId, params.fundTxHash]
+  );
+}
+
+export async function markPositionRelayed(
+  positionId: string,
+  fundTxHash: string,
+  client?: PoolClient
+): Promise<void> {
+  const runner = client ?? pool;
+  await runner.query(`UPDATE positions SET fund_tx_hash = $2, relayed_at = now() WHERE id = $1`, [
+    positionId,
+    fundTxHash,
+  ]);
+}
+
+/** Settled/cancelled/refunded markets whose payouts haven't been pushed onto the escrow yet. */
+export async function findMarketsPendingPayoutRelay(limit = 20): Promise<MarketRow[]> {
+  const res = await query<MarketRow>(
+    `SELECT * FROM markets
+     WHERE status IN ('settled', 'cancelled') AND contract_market_id IS NOT NULL AND payouts_relayed_at IS NULL
+     ORDER BY created_at ASC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+export async function markMarketPayoutsRelayed(marketId: string, txHash: string): Promise<void> {
+  await query(`UPDATE markets SET payouts_relayed_at = now() WHERE id = $1`, [marketId]);
+  await insertMarketEvent({
+    marketId,
+    type: "payout_claimed",
+    payload: { txHash, relayedToEscrow: true },
+    chainTxHash: txHash,
+    confirmed: true,
+  });
+}
+
+/**
+ * Records a creator's cancellation request. Pre-participation only
+ * (total_yes/total_no == 0), matching the contract's own `pure_can_cancel`
+ * guard. If the market never made it past 'pending_chain' (no confirmed
+ * Base deposit relayed onto GenLayer yet), there is nothing on-chain to
+ * unwind, so it's cancelled immediately. Otherwise this just records the
+ * request — the relay job (jobs/baseRelay.ts) drives the actual
+ * cancel_market + escrow refund once it next runs.
+ */
+export async function requestMarketCancellation(marketId: string): Promise<MarketRow> {
+  const res = await query<MarketRow>(
+    `UPDATE markets
+     SET cancel_requested_at = now(),
+         status = CASE WHEN contract_market_id IS NULL THEN 'cancelled' ELSE status END
+     WHERE id = $1
+     RETURNING *`,
+    [marketId]
+  );
+  return res.rows[0];
+}
+
+/** Open markets with a pending cancellation request the relay job hasn't driven to completion yet. */
+export async function findMarketsPendingCancelRelay(limit = 20): Promise<MarketRow[]> {
+  const res = await query<MarketRow>(
+    `SELECT * FROM markets
+     WHERE cancel_requested_at IS NOT NULL AND status = 'open'
+       AND contract_market_id IS NOT NULL AND payouts_relayed_at IS NULL
+     ORDER BY cancel_requested_at ASC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+export async function getBaseRelayWatermark(): Promise<number> {
+  const res = await query<{ last_scanned_block: string }>(
+    `SELECT last_scanned_block FROM base_relay_watermark WHERE id = 1`
+  );
+  return Number(res.rows[0]?.last_scanned_block ?? 0);
+}
+
+export async function setBaseRelayWatermark(blockNumber: number): Promise<void> {
+  await query(
+    `UPDATE base_relay_watermark SET last_scanned_block = $1, updated_at = now() WHERE id = 1`,
+    [blockNumber]
+  );
 }

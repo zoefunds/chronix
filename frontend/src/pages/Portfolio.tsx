@@ -3,9 +3,9 @@ import { Link } from 'react-router-dom'
 import { Button, Card, Label, StatusChip } from '../components/ui'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
-import { formatGen, weiToGen } from '../lib/format'
-import { genlayer } from '../lib/genlayer'
-import type { Address } from 'genlayer-js/types'
+import { formatUsdc, baseUnitsToUsdc } from '../lib/format'
+import { claim as claimFromEscrow } from '../lib/escrow'
+import type { Address } from 'viem'
 import type { PortfolioPosition } from '../types'
 
 /** Markets in these states have *some* exit path available (payout or refund/cancel). */
@@ -41,18 +41,23 @@ export default function Portfolio() {
   }, [wallet])
 
   async function handleClaim(p: PortfolioPosition) {
-    if (!wallet || !p.contract_market_id) return
+    if (!wallet) return
     setClaiming(p.id)
     setClaimError(null)
     try {
-      const contractMarketId = Number(p.contract_market_id)
-      if (p.market_status === 'cancelled') {
-        await genlayer.claimTimeoutRefund(wallet as Address, contractMarketId)
-      } else {
-        await genlayer.claimPayout(wallet as Address, contractMarketId)
+      // Self-serve claim directly against ChronixEscrow on Base Sepolia —
+      // no GenLayer transaction needed. The backend relay job has already
+      // pushed this market's payout amounts onto the escrow once GenLayer
+      // settled/cancelled it (see backend/src/jobs/baseRelay.ts).
+      const escrowInfo = await api.getMarketEscrow(p.market_id)
+      if (!escrowInfo.escrowAddress) {
+        throw new Error('The Base Sepolia escrow contract is not configured on the backend yet.')
       }
-      // Refresh from the backend mirror; the contract is the real source of
-      // truth for whether the claim actually succeeded.
+      await claimFromEscrow({
+        account: wallet as Address,
+        escrowAddress: escrowInfo.escrowAddress as Address,
+        marketIdBytes32: escrowInfo.marketIdBytes32,
+      })
       const refreshed = await api.getPortfolio(wallet)
       setPositions(refreshed.positions)
     } catch (err) {
@@ -73,7 +78,7 @@ export default function Portfolio() {
     )
   }
 
-  const totalStaked = positions.reduce((sum, p) => sum + weiToGen(p.shares), 0)
+  const totalStaked = positions.reduce((sum, p) => sum + baseUnitsToUsdc(p.shares), 0)
   const openCount = positions.filter((p) => p.market_status === 'open').length
 
   return (
@@ -87,7 +92,7 @@ export default function Portfolio() {
         <Card className="p-4">
           <Label>Total staked</Label>
           <div className="font-headline text-headline-lg text-primary mt-1">
-            {totalStaked.toLocaleString(undefined, { maximumFractionDigits: 2 })} GEN
+            {totalStaked.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC
           </div>
         </Card>
         <Card className="p-4">
@@ -125,7 +130,7 @@ export default function Portfolio() {
                   <td className={`p-3 font-label ${p.side === 'yes' ? 'text-secondary' : 'text-pending-amber'}`}>
                     {p.side.toUpperCase()}
                   </td>
-                  <td className="p-3 text-right font-label">{formatGen(p.shares)} GEN</td>
+                  <td className="p-3 text-right font-label">{formatUsdc(p.shares)} USDC</td>
                   <td className="p-3">
                     <StatusChip status={p.market_status} />
                   </td>

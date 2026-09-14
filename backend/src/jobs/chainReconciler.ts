@@ -1,17 +1,18 @@
 /**
- * Chain-write reconciler — keeper actions only.
+ * Chain-write reconciler — permissionless state-advance actions.
  *
- * Money-moving contract methods (create_market, stake, submit_evidence_pointer,
- * claim_payout, claim_timeout_refund, cancel_market) are signed directly by
- * the user's own wallet in the frontend and never touch this queue — see
- * genlayer/client.ts's trust-model docstring. This queue exists only for the
- * two non-payable, fully-permissionless "keeper" actions (request_adjudication,
- * settle) that the backend automates on everyone's behalf using its own
- * keeper account, purely as a convenience so markets don't sit stuck waiting
- * for someone to click a button. Implements exponential backoff with a max
- * attempt count before flagging a job "failed" for manual review.
- * market_events.confirmed is set to true ONLY after an actual tx receipt
- * confirms the state change — never optimistically.
+ * This queue is for the two non-payable, fully-permissionless "keeper"
+ * actions (request_adjudication, settle) that the backend automates using
+ * its relayer account, purely as a convenience so markets don't sit stuck
+ * waiting for someone to click a button — any wallet could call the same
+ * methods with the same effect. The relayer-gated funding/payout mirror
+ * actions (create_market, stake, claim_payout, claim_timeout_refund,
+ * cancel_market) are handled by jobs/baseRelay.ts instead, since those are
+ * driven by Base Sepolia escrow events, not by wall-clock deadlines.
+ * Implements exponential backoff with a max attempt count before flagging a
+ * job "failed" for manual review. market_events.confirmed is set to true
+ * ONLY after an actual tx receipt confirms the state change — never
+ * optimistically.
  */
 import { env } from "../config.js";
 import { logger } from "../lib/logger.js";

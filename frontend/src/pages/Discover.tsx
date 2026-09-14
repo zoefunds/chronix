@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, HorizonBadge, Label, StatusChip } from '../components/ui'
 import { api } from '../lib/api'
-import { formatGen, weiToGen } from '../lib/format'
+import { formatUsdc, baseUnitsToUsdc } from '../lib/format'
 import type { Market, MarketStatus } from '../types'
 
 const categories = [
@@ -84,7 +84,7 @@ export default function Discover() {
   )
 
   const totalStakedGen = markets.reduce(
-    (sum, m) => sum + weiToGen(m.total_yes_wei) + weiToGen(m.total_no_wei) + weiToGen(m.pool_deposited_wei),
+    (sum, m) => sum + baseUnitsToUsdc(m.total_yes_wei) + baseUnitsToUsdc(m.total_no_wei) + baseUnitsToUsdc(m.pool_deposited_wei),
     0
   )
 
@@ -163,7 +163,7 @@ export default function Discover() {
           </div>
           <div className="flex justify-between text-body-sm">
             <span className="text-on-surface-variant">Total staked</span>
-            <span className="font-label text-label-md text-primary">{totalStakedGen.toLocaleString()} GEN</span>
+            <span className="font-label text-label-md text-primary">{totalStakedGen.toLocaleString()} USDC</span>
           </div>
         </Card>
       </aside>
@@ -196,8 +196,8 @@ export default function Discover() {
         {!loading && !error && (
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filtered.map((m) => {
-              const yesGen = weiToGen(m.total_yes_wei)
-              const noGen = weiToGen(m.total_no_wei)
+              const yesGen = baseUnitsToUsdc(m.total_yes_wei)
+              const noGen = baseUnitsToUsdc(m.total_no_wei)
               const total = yesGen + noGen
               const yesPct = total > 0 ? Math.round((yesGen / total) * 100) : 50
               const stakedWei = (
@@ -232,7 +232,7 @@ export default function Discover() {
                     </div>
                   </div>
                   <div className="flex justify-between items-center border-t border-outline-variant/30 pt-3 text-label-sm font-label text-on-surface-variant">
-                    <span>{formatGen(stakedWei)} GEN staked</span>
+                    <span>{formatUsdc(stakedWei)} USDC staked</span>
                     <span>{m.participant_count ?? 0} participants</span>
                   </div>
                 </Card>

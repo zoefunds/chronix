@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - `fly` CLI installed and authenticated (`fly auth login`)
-#   - Fly app created once: `fly apps create chronix-backend`
+#   - Fly app created once: `fly apps create chronix-markets-api`
 #   - Secrets set (see below) before the first deploy
 #   - Build context MUST be the repo root (not backend/) because the backend
 #     Dockerfile COPYs ../database/ migrations into the image.
@@ -31,9 +31,15 @@ echo
 echo "Reminder — set required secrets before first deploy (uncomment/run manually):"
 echo "  fly secrets set DATABASE_URL=postgres://... --config backend/fly.toml"
 echo "  fly secrets set JWT_SECRET=\$(openssl rand -hex 32) --config backend/fly.toml"
-echo "  fly secrets set CONTRACT_ADDRESS=0x... --config backend/fly.toml   # once contract is deployed"
+echo "  fly secrets set CONTRACT_ADDRESS=0x... --config backend/fly.toml   # once you redeploy chronix.py on GenLayer Studio"
 echo "  fly secrets set GENLAYER_RPC_URL=https://studio.genlayer.com/api --config backend/fly.toml"
 echo "  fly secrets set CORS_ORIGIN=https://chronix.vercel.app --config backend/fly.toml"
+echo
+echo "  # Base Sepolia USDC funding layer (contracts/base/ChronixEscrow.sol) + relayer:"
+echo "  fly secrets set RELAYER_PRIVATE_KEY=0x... --config backend/fly.toml"
+echo "  fly secrets set BASE_SEPOLIA_RELAYER_PRIVATE_KEY=0x... --config backend/fly.toml   # same key as above"
+echo "  fly secrets set CHRONIX_ESCROW_ADDRESS=0x... --config backend/fly.toml   # once ChronixEscrow.sol is deployed"
+echo "  fly secrets set BASE_SEPOLIA_USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e --config backend/fly.toml"
 echo
 
 # NOTE: `fly deploy` is deliberately NOT invoked by this script automatically

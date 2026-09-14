@@ -47,7 +47,7 @@ describe("REST API — evidence submission & market lifecycle", () => {
     expect(body.db).toBe("up");
   });
 
-  it("records a market only after it was already confirmed on-chain (contractMarketId + txHash required)", async () => {
+  it("records a market as pending_chain BEFORE any USDC deposit is confirmed on Base Sepolia", async () => {
     const token = app.jwt.sign({ wallet: WALLET });
 
     const res = await app.inject({
@@ -60,18 +60,16 @@ describe("REST API — evidence submission & market lifecycle", () => {
         horizonYears: 10,
         resolutionCriteria: "Resolved by consensus of independent retrospectives.",
         resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-        contractMarketId: "42",
-        txHash: "0xabc123",
       },
     });
 
     expect(res.statusCode).toBe(201);
     const body = res.json();
-    expect(body.market.status).toBe("open");
-    expect(body.market.contract_market_id).toBe("42");
+    expect(body.market.status).toBe("pending_chain");
+    expect(body.market.contract_market_id).toBe(null);
   });
 
-  it("rejects a market recording request missing the on-chain proof fields", async () => {
+  it("rejects a market recording request missing required fields", async () => {
     const token = app.jwt.sign({ wallet: WALLET });
 
     const res = await app.inject({
@@ -79,12 +77,10 @@ describe("REST API — evidence submission & market lifecycle", () => {
       url: "/markets",
       headers: { authorization: `Bearer ${token}` },
       payload: {
-        question: "Missing on-chain proof?",
+        question: "Missing fields?",
         category: "test",
         horizonYears: 1,
-        resolutionCriteria: "criteria text long enough",
-        resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-        // contractMarketId / txHash intentionally omitted
+        // resolutionCriteria / resolvesAt intentionally omitted
       },
     });
     expect(res.statusCode).toBe(400);
@@ -100,7 +96,6 @@ describe("REST API — evidence submission & market lifecycle", () => {
         horizonYears: 1,
         resolutionCriteria: "criteria text long enough",
         resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-        contractMarketId: "1",
         txHash: "0xabc",
       },
     });
@@ -115,7 +110,6 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-      contractMarketId: "99",
     });
     await setMarketStatus(market.id, "open");
 
@@ -150,7 +144,6 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(), // future
-      contractMarketId: "100",
     });
     await setMarketStatus(market.id, "open");
 
@@ -169,7 +162,6 @@ describe("REST API — evidence submission & market lifecycle", () => {
       resolutionCriteria: "criteria",
       createdBy: WALLET,
       resolvesAt: new Date(Date.now() + 3600_000).toISOString(),
-      contractMarketId: "101",
     });
     await setMarketStatus(m1.id, "open");
 

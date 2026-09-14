@@ -3,6 +3,64 @@
 Read this file first in any new session. It is the living memory of architecture decisions,
 deployment state, gotchas, and open TODOs for the Chronix project.
 
+> **2026-09-14 — Funding moved from native GEN to USDC on Base Sepolia; backend moved to a new
+> Fly.io account.** At the user's direct request:
+> 1. `contracts/chronix.py` no longer moves money at all — `_send_gen`/`_GenRecipient` and every
+>    `payable` decorator were removed. All money now lives in a new
+>    `contracts/base/ChronixEscrow.sol` on Base Sepolia (USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`).
+>    GenLayer is adjudication + ledger-of-record only. Every write method on `Chronix` is now
+>    gated by a single `relayer_address` (constructor arg) instead of trusting
+>    `gl.message.sender_address` directly — see the class docstring in `chronix.py` and
+>    `contracts/base/README.md` for the full trust model. This mirrors the
+>    Base/GenLayer relay pattern from the meme-olympics/event-weaver reference projects.
+> 2. `ChronixEscrow.sol` deployed to Base Sepolia at
+>    **`0xeCA7236a62bf3c17e31B168692CA1871eCee91eB`** (deploy block 46811025), using a
+>    throwaway/testnet-only key the user supplied in chat (`RELAYER_ADDRESS` /
+>    `RELAYER_PRIVATE_KEY` = `0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`). The SAME key must be
+>    passed as `relayer_address` when the user redeploys `chronix.py` on GenLayer Studio — they
+>    are doing that redeploy themselves (chain id 61999); `CONTRACT_ADDRESS` is intentionally
+>    left blank in `backend/.env`/Fly secrets until they hand over the new address.
+> 3. The backend gained `services/baseSepolia.ts` (escrow read/write helpers),
+>    `jobs/baseRelay.ts` (bridges confirmed Base deposits -> GenLayer, and settled GenLayer
+>    payouts -> escrow `setPayouts`), migration `008_base_sepolia_usdc_funding.sql`, and
+>    `POST /markets` / `POST /markets/:id/positions` now create `pending_chain` rows BEFORE any
+>    chain write (the frontend funds `ChronixEscrow.fund()` directly with the row's id hashed to
+>    bytes32 — see `GET /markets/:id/escrow`). `GENLAYER_KEEPER_PRIVATE_KEY` was renamed
+>    `RELAYER_PRIVATE_KEY` (same key now does keeper duty AND relayer duty).
+> 4. **The old Fly.io account holding `chronix-backend` was lost (no access).** A new backend
+>    was stood up on the connected Fly.io account: app **`chronix-markets-api`**
+>    (https://chronix-markets-api.fly.dev), Postgres **`chronix-markets-db`** (attached, 2
+>    machines in `iad`). All 8 migrations applied via `fly ssh console -a chronix-markets-api -C
+>    "node dist/db/migrate.js"`. `fly.toml`'s `app =` and every doc reference to the old
+>    `chronix-backend` app name were updated to `chronix-markets-api` (README.md,
+>    `scripts/deploy-fly.sh`, `backend/src/lib/logger.ts`'s service name). The frontend's
+>    `VITE_API_URL` was repointed to the new URL — see the Vercel section below for whether that
+>    also needs a production env var update there.
+> 5. **2026-09-14 (same day, follow-up) — frontend wallet-flow rewiring done.**
+>    `frontend/src/lib/escrow.ts` is new — the only place in the frontend that moves real money,
+>    always via the user's own wallet on Base Sepolia (approveAndFund / claim, viem + @wagmi/core
+>    against `wagmiConfig`). `frontend/src/lib/wagmi.ts` now configures BOTH chains
+>    (`baseSepolia` id 84532 + `genlayerStudio` id 61999) so the wallet can switch between them.
+>    `frontend/src/lib/genlayer.ts` now only exposes `submitEvidencePointer` (the one write that
+>    never moved money and stayed permissionless) — `createMarket`/`stake`/`claim*` were removed
+>    since those are relayer-gated on-chain now. `CreateMarket.tsx`, `MarketDetail.tsx`,
+>    `Portfolio.tsx`, `AdjudicationResult.tsx` all rewired to the pending-row-then-fund pattern
+>    (`api.createMarket`/`api.stake` create a `pending_chain` row first, then
+>    `escrow.approveAndFund` funds it on Base Sepolia; claiming calls `escrow.claim` directly,
+>    no GenLayer tx needed). `lib/format.ts` gained `baseUnitsToUsdc`/`formatUsdc` (6 decimals)
+>    alongside the old `weiToGen`/`formatGen` (kept, unused, for reference). **Market
+>    cancellation (`handleCancel` in MarketDetail.tsx) is intentionally disabled** — it shows an
+>    "unavailable" message instead of a broken call, since `cancel_market` is now relayer-gated
+>    and there's no backend "request cancel" endpoint yet (the creator's own wallet can no
+>    longer call it directly — that's a real trust-model change, not just a UI gap). Frontend
+>    `tsc -b`, `vite build`, `vitest run`, and `oxlint` all pass clean as of this entry.
+>    **Deployed and confirmed end-to-end same day**: new GenLayer contract
+>    `0x9e09470D7e3D0cf044E27060Db57f39517b76984` (its on-chain `relayer_address` verified to
+>    match `0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`), `CONTRACT_ADDRESS` set on the
+>    `chronix-markets-api` Fly app + local `.env` files, and the `chronix-markets-db` Postgres
+>    `markets` table cleared (0 rows — was already empty) with the Base relay watermark reset to
+>    0 so the relay job re-scans from `BASE_SEPOLIA_ESCROW_DEPLOY_BLOCK` fresh.
+
 > Project name is **Chronix** (renamed from "EchoMarkets" on 2026-07-29 at the user's direct
 > request in chat). Repo/package names, contract file (`contracts/chronix.py`, class
 > `Chronix`), docs, env defaults, and page titles were all updated in one pass. The logo mark
@@ -22,13 +80,19 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   check, 2 regions/machines for redundancy).
 - **Auth**: Wallet-only, Sign-In-With-Ethereum (SIWE). MetaMask / WalletConnect v2 / Rainbow /
   Zerion. No email/password, no social OAuth.
-- **Contract**: One Python GenLayer Intelligent Contract, `contracts/chronix.py`,
-  1000+ lines, deployed by the user manually in GenLayer Studio (StudioNet, GEN gas token).
-  The user deploys it — this repo never runs a deploy for the contract.
-- **Escrow**: Real GEN value transfer. Payable writes read `gl.message.value` only (never a
-  caller-supplied amount param). Ledger fields separate from "terms" fields. Zero-then-transfer
-  ordering on every payout path. Single `_send_gen` emission chokepoint. Explicit exit paths:
-  settle (YES/NO/split), `claim_timeout_refund`, `cancel_market` (pre-participation only).
+- **Contract**: One Python GenLayer Intelligent Contract, `contracts/chronix.py`, deployed by
+  the user manually in GenLayer Studio (StudioNet). The user deploys it — this repo never runs
+  a deploy for the contract. **SUPERSEDED 2026-09-14**: this contract now moves no money at
+  all — it's adjudication + ledger-of-record only, gated by a single relayer_address (see next
+  bullet and the 2026-09-14 entries above).
+- **Escrow — SUPERSEDED 2026-09-14, see entries above**: money moved from native GEN
+  (`gl.message.value`, `_send_gen`) to real USDC on Base Sepolia, held by
+  `contracts/base/ChronixEscrow.sol` (currently deployed at
+  `0xeCA7236a62bf3c17e31B168692CA1871eCee91eB`). `chronix.py` keeps the same zero-then-return
+  ordering and explicit exit paths (settle YES/NO/split, `claim_timeout_refund`, `cancel_market`
+  pre-participation-only) as ledger accounting only — the backend relayer bridges confirmed
+  Base deposits and GenLayer settlement outcomes between the two chains
+  (`backend/src/jobs/baseRelay.ts`).
 - **Adjudication**: Contract-side nondeterministic web fetch against >=3 real source
   categories (news/academic/financial), non-strict equivalence-principle consensus so
   validators don't diverge into "undetermined." Never trusts user-submitted evidence summaries
@@ -55,6 +119,23 @@ deployment state, gotchas, and open TODOs for the Chronix project.
   chain truth, independent of whether this backend was the one that triggered the transition.
 
 ## Deployment state
+
+> **CURRENT as of 2026-09-14 — read this first, the bullets below are historical.**
+> - GenLayer contract: `0x9e09470D7e3D0cf044E27060Db57f39517b76984` (relayer-gated, v4 and
+>   earlier addresses below are all dead/superseded).
+> - Backend: `chronix-markets-api` on Fly.io (https://chronix-markets-api.fly.dev) — the
+>   `chronix-backend` app referenced throughout this section is on a **lost Fly.io account** and
+>   no longer in use.
+> - Database: `chronix-markets-db` (Fly Postgres, attached to `chronix-markets-api`) —
+>   `chronix-db` below is on the lost account.
+> - Funding: real USDC on Base Sepolia via `contracts/base/ChronixEscrow.sol`
+>   (`0xeCA7236a62bf3c17e31B168692CA1871eCee91eB`), not native GEN — see the 2026-09-14 entries
+>   at the top of this file for the full architecture change.
+> - Frontend `VITE_CONTRACT_ADDRESS`/`VITE_API_URL` point at the two addresses above.
+> The bullets immediately below (contract v1-v4 history, the old `chronix-backend`/`chronix-db`
+> deploy notes, keeper wallet funding, WalletConnect setup, chain-indexer/payout-core fix
+> writeups) are kept as historical record — the reasoning and hard-won lessons in them are still
+> accurate and useful, only the live addresses/URLs they reference are stale.
 
 - **Contract address**: **DEPLOYED (v4)** — `0xda22B6c11d3709d8Fb446C2aFf569991fC4ACE39` on
   GenLayer Studio/StudioNet, deployed 2026-08-11 by the user themselves (this repo never

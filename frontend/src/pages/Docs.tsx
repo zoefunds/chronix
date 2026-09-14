@@ -11,7 +11,7 @@ const sections = [
   },
   {
     title: 'Escrow model',
-    body: 'Staked GEN is held on-chain by the GenLayer Intelligent Contract, never by Chronix\' servers. Ledger fields are zeroed before any transfer, and all money movement funnels through a single, auditable transfer chokepoint in the contract. Exit paths exist for settlement, disputes, timeout-reclaim, and pre-participation cancellation.',
+    body: 'Staked USDC is held on-chain by ChronixEscrow on Base Sepolia, never by Chronix\' servers. The GenLayer Intelligent Contract handles adjudication and ledger accounting only — it never custodies funds itself. Ledger fields are zeroed before any payout is credited, and a trusted relayer bridges confirmed deposits and settlement outcomes between the two chains. Exit paths exist for settlement, disputes, timeout-reclaim, and pre-participation cancellation.',
   },
   {
     title: 'Adjudication model',

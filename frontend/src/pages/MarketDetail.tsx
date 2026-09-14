@@ -4,8 +4,9 @@ import { Button, Card, EvidenceChip, HorizonBadge, Label, StatusChip } from '../
 import { api, ApiError } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { genlayer } from '../lib/genlayer'
-import { formatGen, weiToGen } from '../lib/format'
-import type { Address } from 'genlayer-js/types'
+import { approveAndFund, usdcToBaseUnits, FUND_KIND_YES, FUND_KIND_NO } from '../lib/escrow'
+import { formatUsdc, baseUnitsToUsdc } from '../lib/format'
+import type { Address } from 'viem'
 import type { Evidence, Market } from '../types'
 
 const stepperStages = [
@@ -134,8 +135,8 @@ export default function MarketDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allowedSourceTypes])
 
-  const yesGen = market ? weiToGen(market.total_yes_wei) : 0
-  const noGen = market ? weiToGen(market.total_no_wei) : 0
+  const yesGen = market ? baseUnitsToUsdc(market.total_yes_wei) : 0
+  const noGen = market ? baseUnitsToUsdc(market.total_no_wei) : 0
   const totalPool = yesGen + noGen
   const yesPct = totalPool > 0 ? Math.round((yesGen / totalPool) * 100) : 50
   const stageIndex = market ? currentStageIndex(market.status) : 0
@@ -154,22 +155,32 @@ export default function MarketDetail() {
       setStakeError('Connect and sign in with your wallet first.')
       return
     }
-    if (!market.contract_market_id) {
-      setStakeError('This market has no on-chain id yet.')
-      return
-    }
     setStakeError(null)
     setStaking(true)
     try {
+      // Step 1: create a pending position row — no chain write yet, just
+      // gets us something to fund against (see src/lib/escrow.ts).
       setStakeStep('signing')
-      const txHash = await genlayer.stake(
-        wallet as Address,
-        Number(market.contract_market_id),
-        side.toUpperCase() as 'YES' | 'NO',
-        amount
-      )
+      const amountBaseUnits = usdcToBaseUnits(amount)
+      await api.stake(market.id, { side, shares: amountBaseUnits.toString(), avgPrice: '1' }, token)
+
+      // Step 2: the user's OWN wallet approves + funds USDC directly on
+      // Base Sepolia. The backend relayer mirrors this confirmed deposit
+      // onto GenLayer's `stake` automatically.
+      const escrowInfo = await api.getMarketEscrow(market.id)
+      if (!escrowInfo.escrowAddress) {
+        throw new Error('The Base Sepolia escrow contract is not configured on the backend yet.')
+      }
       setStakeStep('recording')
-      await api.stake(market.id, { side, shares: amount, avgPrice: '1', txHash }, token)
+      await approveAndFund({
+        account: wallet as Address,
+        escrowAddress: escrowInfo.escrowAddress as Address,
+        usdcAddress: escrowInfo.usdcAddress as Address,
+        marketIdBytes32: escrowInfo.marketIdBytes32,
+        kind: side === 'yes' ? FUND_KIND_YES : FUND_KIND_NO,
+        amountBaseUnits,
+      })
+
       const refreshed = await api.getMarket(market.id)
       setMarket(refreshed)
     } catch (err) {
@@ -181,15 +192,19 @@ export default function MarketDetail() {
   }
 
   async function handleCancel() {
-    if (!market || !market.contract_market_id || !wallet) return
+    // cancel_market is relayer-gated on GenLayer now (see contracts/chronix.py
+    // class docstring) — the creator's own wallet can no longer call it
+    // directly. This records the request; the backend relay job drives the
+    // actual cancellation + escrow refund (immediate if the market never
+    // made it past 'pending_chain' — see POST /markets/:id/cancel-request).
+    if (!market || !token) return
     setCancelError(null)
     setCancelling(true)
     try {
-      await genlayer.cancelMarket(wallet as Address, Number(market.contract_market_id))
-      const refreshed = await api.getMarket(market.id)
-      setMarket(refreshed)
+      const { market: updated } = await api.requestCancel(market.id, token)
+      setMarket(updated)
     } catch (err) {
-      setCancelError(err instanceof Error ? err.message : 'Cancel failed — the contract rejected this call.')
+      setCancelError(err instanceof Error ? err.message : 'Cancel request failed.')
     } finally {
       setCancelling(false)
     }
@@ -498,7 +513,7 @@ export default function MarketDetail() {
               </button>
             </div>
             <label className="flex flex-col gap-1">
-              <Label>Amount (GEN)</Label>
+              <Label>Amount (USDC)</Label>
               <input
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
@@ -522,7 +537,7 @@ export default function MarketDetail() {
                     : `Stake ${side.toUpperCase()}`}
             </Button>
             <p className="text-label-sm font-label text-on-surface-variant">
-              Escrowed GEN is held on-chain until settlement. No off-chain custody — this transaction is signed
+              Escrowed USDC is held on Base Sepolia until settlement. No off-chain custody — this transaction is signed
               by your own wallet directly against the GenLayer contract.
             </p>
           </Card>
@@ -541,15 +556,15 @@ export default function MarketDetail() {
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">YES pool</span>
-              <span className="font-label text-label-md text-secondary">{formatGen(market.total_yes_wei)} GEN</span>
+              <span className="font-label text-label-md text-secondary">{formatUsdc(market.total_yes_wei)} USDC</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">NO pool</span>
-              <span className="font-label text-label-md text-pending-amber">{formatGen(market.total_no_wei)} GEN</span>
+              <span className="font-label text-label-md text-pending-amber">{formatUsdc(market.total_no_wei)} USDC</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">Initial liquidity</span>
-              <span className="font-label text-label-md text-primary">{formatGen(market.pool_deposited_wei)} GEN</span>
+              <span className="font-label text-label-md text-primary">{formatUsdc(market.pool_deposited_wei)} USDC</span>
             </div>
             <div className="flex justify-between text-body-sm">
               <span className="text-on-surface-variant">Participants</span>
@@ -568,9 +583,16 @@ export default function MarketDetail() {
                   No one has staked yet — you can still cancel this market and reclaim your initial liquidity.
                 </p>
                 {cancelError && <p className="text-label-sm font-label text-error">{cancelError}</p>}
-                <Button variant="outline" disabled={cancelling} onClick={handleCancel}>
-                  {cancelling ? 'Cancelling…' : 'Cancel Market & Reclaim Liquidity'}
-                </Button>
+                {market.cancel_requested_at ? (
+                  <p className="text-label-sm font-label text-pending-amber">
+                    Cancellation requested — the relayer will process your refund shortly. Check Portfolio to claim
+                    once it lands.
+                  </p>
+                ) : (
+                  <Button variant="outline" disabled={cancelling} onClick={handleCancel}>
+                    {cancelling ? 'Requesting…' : 'Cancel Market & Reclaim Liquidity'}
+                  </Button>
+                )}
               </Card>
             )}
         </div>

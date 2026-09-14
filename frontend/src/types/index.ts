@@ -18,9 +18,11 @@ export type EvidenceSourceType = 'news' | 'academic' | 'government' | 'market' |
 /**
  * Matches the backend's real markets row shape (snake_case, as returned by
  * GET /markets and GET /markets/:id — see backend/src/db/repositories.ts
- * MarketRow). Wei fields are decimal-string GEN amounts (18 decimals) — use
- * weiToGen() from lib/format.ts to render them, never parseFloat directly
- * (precision loss on large values).
+ * MarketRow). The `*_wei` fields are decimal-string USDC base-unit amounts
+ * (6 decimals; the name predates the move off native GEN — see
+ * contracts/chronix.py) — use baseUnitsToUsdc()/formatUsdc() from
+ * lib/format.ts to render them, never parseFloat directly (precision loss
+ * on large values).
  */
 export interface Market {
   id: string
@@ -40,6 +42,8 @@ export interface Market {
   verdict: string | null
   /** Comma-separated; NULL/empty means the contract enforces no restriction. */
   allowed_evidence_types: string | null
+  /** Set once the creator requests cancellation — see POST /markets/:id/cancel-request. */
+  cancel_requested_at: string | null
   participant_count?: string
 }
 

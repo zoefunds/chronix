@@ -30,23 +30,20 @@ export const marketIdParamSchema = z.object({
   id: z.string().uuid(),
 });
 
-// The user's own wallet has already called create_market directly on
-// GenLayer (payable, signed client-side) by the time this hits the backend
-// — this endpoint only records what already happened on-chain, it never
-// submits the write itself. contractMarketId + txHash are required as proof
-// of that, not optional metadata.
+// Funding moved to real USDC on Base Sepolia (ChronixEscrow.sol) — this
+// endpoint creates the 'pending_chain' row BEFORE any chain write, so the
+// frontend has a market id to derive the escrow's bytes32 key from and fund
+// against. No contractMarketId/txHash yet; the relay job assigns those once
+// it observes and mirrors the confirmed ChronixEscrow.fund deposit.
 export const createMarketSchema = z.object({
   question: z.string().min(10).max(500),
   category: z.string().min(2).max(64),
   horizonYears: z.number().positive().max(200),
   resolutionCriteria: z.string().min(10).max(2000),
   resolvesAt: z.string().datetime(),
-  contractMarketId: z.string().regex(/^\d+$/, "Must be the numeric id returned by create_market"),
-  txHash: z.string().min(1),
-  // Same comma-separated categories already sent on-chain to create_market
-  // — mirrored here so the frontend can filter the evidence-submission
-  // dropdown to what the contract will actually accept (it now enforces
-  // this allow-list on submit_evidence_pointer).
+  // Same comma-separated categories that will be sent on-chain to
+  // create_market once funded — mirrored here so the frontend can filter
+  // the evidence-submission dropdown to what the contract will accept.
   allowedEvidenceSources: z.array(z.string().min(1)).optional(),
 });
 
@@ -63,12 +60,14 @@ export const walletParamSchema = z.object({
   wallet: walletAddressSchema,
 });
 
-// Same pattern as createMarketSchema/submitEvidenceSchema: the user's own
-// wallet already called the payable `stake` method directly on GenLayer.
-// This just mirrors it into Postgres for fast reads.
+// Same pending-first pattern as createMarketSchema: this creates the
+// position row BEFORE the user funds ChronixEscrow.fund(marketId,
+// KIND_YES|KIND_NO, amount) on Base Sepolia. `shares` is the intended USDC
+// stake amount (base units, 6 decimals) — the relay job mirrors the
+// confirmed deposit onto GenLayer's `stake` once it sees the matching
+// Funded event.
 export const recordStakeSchema = z.object({
   side: z.enum(["yes", "no"]),
-  shares: z.string().regex(/^\d+(\.\d+)?$/, "Must be a decimal GEN amount"),
+  shares: z.string().regex(/^\d+$/, "Must be a whole-number USDC base-unit amount"),
   avgPrice: z.string().regex(/^\d+(\.\d+)?$/).default("1"),
-  txHash: z.string().min(1),
 });

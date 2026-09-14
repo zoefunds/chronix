@@ -71,16 +71,14 @@ export const api = {
   },
 
   /**
-   * POST /markets — records a market AFTER the user's own wallet already
-   * signed and submitted create_market directly on GenLayer (see
-   * src/lib/genlayer.ts). onChain proof (contractMarketId + txHash) is
-   * required — this never submits the on-chain write itself.
+   * POST /markets — creates a 'pending_chain' row BEFORE any chain write.
+   * Funding is real USDC on Base Sepolia now (see src/lib/escrow.ts): call
+   * this FIRST to get a market id, then getMarketEscrow(id) for the
+   * ChronixEscrow funding target, then escrow.approveAndFund(...) with the
+   * user's own wallet. The backend relay job mirrors the confirmed deposit
+   * onto GenLayer automatically — no second "record on-chain" call needed.
    */
-  async createMarket(
-    payload: CreateMarketPayload,
-    onChain: { contractMarketId: string; txHash: string; resolvesAt: string },
-    token: string,
-  ) {
+  async createMarket(payload: CreateMarketPayload, resolvesAt: string, token: string) {
     const res = await request<{ market: Market }>(
       '/markets',
       {
@@ -90,9 +88,7 @@ export const api = {
           category: payload.category,
           horizonYears: payload.horizonYears === 'permanent' ? 100 : payload.horizonYears,
           resolutionCriteria: payload.resolutionCriteria,
-          resolvesAt: onChain.resolvesAt,
-          contractMarketId: onChain.contractMarketId,
-          txHash: onChain.txHash,
+          resolvesAt,
           allowedEvidenceSources: payload.allowedEvidenceSources,
         }),
       },
@@ -101,6 +97,34 @@ export const api = {
     return res.market
   },
 
+  /**
+   * GET /markets/:id/escrow — ChronixEscrow address, USDC address, this
+   * market's bytes32 key, and the fund() kind constants. Everything
+   * lib/escrow.ts needs to build a fund() call for this market.
+   */
+  getMarketEscrow: (id: string) =>
+    request<{
+      escrowAddress: string | null
+      usdcAddress: string
+      chainId: number
+      marketIdBytes32: `0x${string}`
+      kinds: { pool: number; yes: number; no: number }
+    }>(`/markets/${id}/escrow`),
+
+  /** GET /markets/:id/claimable/:wallet — USDC claimable directly from ChronixEscrow.claim(). */
+  getClaimable: (id: string, wallet: string) =>
+    request<{ claimable: string }>(`/markets/${id}/claimable/${wallet}`),
+
+  /**
+   * POST /markets/:id/cancel-request — creator-only, pre-participation-only.
+   * cancel_market is relayer-gated on GenLayer now, so this records the
+   * request instead of calling the contract directly; the backend relay
+   * job drives the actual cancellation + escrow refund (immediate if the
+   * market never made it past 'pending_chain').
+   */
+  requestCancel: (id: string, token: string) =>
+    request<{ market: Market }>(`/markets/${id}/cancel-request`, { method: "POST" }, token),
+
   /** GET /markets/:id/positions */
   async getMarketPositions(id: string) {
     const res = await request<{ positions: Position[] }>(`/markets/${id}/positions`)
@@ -108,14 +132,12 @@ export const api = {
   },
 
   /**
-   * POST /markets/:id/positions — records a stake AFTER the user's own
-   * wallet already called the payable `stake` method directly on GenLayer.
+   * POST /markets/:id/positions — creates a pending position row BEFORE the
+   * user funds ChronixEscrow (KIND_YES|KIND_NO) on Base Sepolia — same
+   * pending-first pattern as createMarket above. `shares` is the intended
+   * USDC stake amount in base units (6 decimals).
    */
-  async stake(
-    id: string,
-    payload: { side: 'yes' | 'no'; shares: string; avgPrice: string; txHash: string },
-    token: string,
-  ) {
+  async stake(id: string, payload: { side: 'yes' | 'no'; shares: string; avgPrice: string }, token: string) {
     const res = await request<{ position: Position }>(
       `/markets/${id}/positions`,
       { method: 'POST', body: JSON.stringify(payload) },

@@ -1,0 +1,16 @@
+{
+  "name": "chronix-contracts-base",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deploy script for ChronixEscrow.sol (Base Sepolia USDC funding layer).",
+  "main": "deploy.js",
+  "scripts": {
+    "deploy": "node deploy.js"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "ethers": "^6.17.0",
+    "solc": "^0.8.37"
+  }
+}

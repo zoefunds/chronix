@@ -23,15 +23,34 @@ const envSchema = z.object({
   CONTRACT_ADDRESS: z.string().default(""),
   GENLAYER_RPC_URL: z.string().default("https://studio.genlayer.com/api"),
   GENLAYER_CHAIN_ID: z.coerce.number().int().default(61999),
-  // Backend-held keeper account. ONLY ever used to call non-payable, permissionless
-  // state-advancing methods (request_adjudication, settle) once their on-chain
-  // preconditions are already met — it never touches gl.message.value, never signs a
-  // create_market/stake/claim on a user's behalf, and never custodies user funds.
-  // Leave unset to disable the keeper job entirely (falls back to no automated
-  // settlement — markets can still be advanced by any user's own wallet calling the
-  // same public, permissionless contract methods).
-  GENLAYER_KEEPER_PRIVATE_KEY: z.string().optional(),
+  // Backend-held relayer account. Funding moved from native GEN to real USDC
+  // on Base Sepolia (see contracts/chronix.py + contracts/base/ChronixEscrow.sol),
+  // so this key now does double duty: (a) the same non-payable "keeper" state
+  // advances as before (request_adjudication, settle — permissionless, any
+  // wallet could call these with the same effect), and (b) every
+  // relayer-gated write on GenLayer (create_market, stake, claim_payout,
+  // claim_timeout_refund, cancel_market) that mirrors a USDC event already
+  // confirmed on Base Sepolia — see genlayer/client.ts's trust-model
+  // docstring. It must be the SAME address configured as chronix.py's
+  // `relayer_address` constructor arg AND ChronixEscrow.sol's `relayer_`
+  // constructor arg. Leave unset to disable the relayer job entirely.
+  RELAYER_PRIVATE_KEY: z.string().optional(),
   KEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(30000),
+  BASE_RELAY_INTERVAL_MS: z.coerce.number().int().positive().default(20000),
+
+  // --- Base Sepolia (USDC funding layer — contracts/base/ChronixEscrow.sol) ---
+  BASE_SEPOLIA_RPC_URL: z.string().default("https://sepolia.base.org"),
+  BASE_SEPOLIA_CHAIN_ID: z.coerce.number().int().default(84532),
+  BASE_SEPOLIA_USDC_ADDRESS: z.string().default("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
+  CHRONIX_ESCROW_ADDRESS: z.string().default(""),
+  // Same key as RELAYER_PRIVATE_KEY above — kept as a distinct env var since
+  // it signs transactions on a different chain, but intentionally set to
+  // the identical value so both chains trust the one backend-held key.
+  BASE_SEPOLIA_RELAYER_PRIVATE_KEY: z.string().optional(),
+  // First block to start scanning ChronixEscrow Funded events from if
+  // base_relay_watermark is still at its default 0 (i.e. right after the
+  // contract's own deployment block) — avoids an expensive full-chain scan.
+  BASE_SEPOLIA_ESCROW_DEPLOY_BLOCK: z.coerce.number().int().nonnegative().default(0),
 
   // Optional. Best-effort read cache only (see src/lib/cache.ts) — never a
   // dependency for correctness. Leave unset to disable caching entirely.
