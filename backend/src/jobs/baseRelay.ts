@@ -59,6 +59,39 @@ import { FUND_KIND_POOL, FUND_KIND_YES, FUND_KIND_NO } from "../lib/escrowAbi.js
 const MAX_BLOCK_RANGE = 2000; // conservative window per pass to stay within RPC log-range limits
 
 /**
+ * This job runs independently on every Fly machine (currently 2), each on
+ * its own interval, with no coordination between them. Before this lock
+ * existed, two machines could both pick up the SAME pending market/position
+ * in the same tick, both submit a real create_market/stake/cancel_market/
+ * claim_* write to GenLayer for it, and only one machine's Postgres UPDATE
+ * would "win" — leaving a second, real on-chain market or claim with no
+ * matching Postgres row (found live 2026-09-16: two duplicate on-chain
+ * markets from one Base Sepolia deposit each, backfilled by the chain
+ * indexer as phantom extra rows with no funding of their own).
+ *
+ * Fix: claim a Postgres advisory lock scoped to the transaction (released
+ * automatically on COMMIT/ROLLBACK) BEFORE calling out to GenLayer, keyed
+ * by the row's own id, and hold it for the entire GenLayer write + Postgres
+ * update. A concurrent machine's pg_try_advisory_xact_lock on the same key
+ * returns false immediately (never blocks), so it just skips that row this
+ * tick and picks it up next tick once the lock-holder has either committed
+ * (row no longer "pending") or rolled back (safe to retry). This does hold
+ * a pooled DB connection idle for the duration of one on-chain write — at
+ * this system's market volume (a handful of pending items per tick, ever)
+ * that's an acceptable tradeoff for closing a double-write race; it would
+ * need revisiting under real load.
+ */
+async function withRowLock<T>(id: string, fn: (client: import("pg").PoolClient) => Promise<T>): Promise<T | "locked"> {
+  return withTransaction(async (client) => {
+    const lockRes = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked", [
+      id,
+    ]);
+    if (!lockRes.rows[0]?.locked) return "locked" as const;
+    return fn(client);
+  });
+}
+
+/**
  * Scans the next block window and persists any Funded events found into
  * base_relay_events, durably and independent of whether anything
  * downstream succeeds this tick. The watermark still only tracks scan
@@ -93,17 +126,24 @@ async function relayPendingPools(): Promise<number> {
     if (!match) continue;
 
     try {
-      const { txHash, contractMarketId } = await genlayerClient.createMarket({
-        creatorWallet: market.created_by,
-        poolDeposited: match.amount,
-        question: market.question,
-        category: market.category,
-        horizonYears: Number(market.horizon_years),
-        resolutionCriteria: market.resolution_criteria,
-        allowedEvidenceTypes: market.allowed_evidence_types ?? "",
-      });
+      const result = await withRowLock(market.id, async (client) => {
+        // Re-check under the lock: another machine may have relayed this
+        // market between our initial SELECT above and acquiring the lock.
+        const fresh = await client.query<{ pool_relayed_at: string | null }>(
+          "SELECT pool_relayed_at FROM markets WHERE id = $1",
+          [market.id]
+        );
+        if (fresh.rows[0]?.pool_relayed_at) return null;
 
-      await withTransaction(async (client) => {
+        const { txHash, contractMarketId } = await genlayerClient.createMarket({
+          creatorWallet: market.created_by,
+          poolDeposited: match.amount,
+          question: market.question,
+          category: market.category,
+          horizonYears: Number(market.horizon_years),
+          resolutionCriteria: market.resolution_criteria,
+          allowedEvidenceTypes: market.allowed_evidence_types ?? "",
+        });
         await markMarketPoolRelayed(
           market.id,
           { contractMarketId: String(contractMarketId), fundTxHash: match.tx_hash },
@@ -119,9 +159,11 @@ async function relayPendingPools(): Promise<number> {
           },
           client
         );
+        return contractMarketId;
       });
+      if (result === "locked" || result === null) continue;
       relayed += 1;
-      logger.info({ marketId: market.id, contractMarketId }, "Relayed pool funding to GenLayer create_market");
+      logger.info({ marketId: market.id, contractMarketId: result }, "Relayed pool funding to GenLayer create_market");
     } catch (err) {
       logger.error({ err, marketId: market.id }, "Failed to relay pool funding onto GenLayer — will retry next pass");
     }
@@ -157,20 +199,33 @@ async function relayPendingStakes(): Promise<number> {
     if (!match) continue;
 
     try {
-      const { txHash } = await genlayerClient.stake({
-        contractMarketId: Number(market.contract_market_id),
-        wallet: position.wallet_address,
-        side: position.side,
-        amount: match.amount,
+      const result = await withRowLock(position.id, async (client) => {
+        const fresh = await client.query<{ relayed_at: string | null }>(
+          "SELECT relayed_at FROM positions WHERE id = $1",
+          [position.id]
+        );
+        if (fresh.rows[0]?.relayed_at) return null;
+
+        const { txHash } = await genlayerClient.stake({
+          contractMarketId: Number(market.contract_market_id),
+          wallet: position.wallet_address,
+          side: position.side,
+          amount: match.amount,
+        });
+        await markPositionRelayed(position.id, match.tx_hash, client);
+        await insertMarketEvent(
+          {
+            marketId: position.market_id,
+            type: "stake_recorded",
+            payload: { side: position.side, shares: position.shares, baseFundTxHash: match.tx_hash },
+            chainTxHash: txHash,
+            confirmed: true,
+          },
+          client
+        );
+        return true;
       });
-      await markPositionRelayed(position.id, match.tx_hash);
-      await insertMarketEvent({
-        marketId: position.market_id,
-        type: "stake_recorded",
-        payload: { side: position.side, shares: position.shares, baseFundTxHash: match.tx_hash },
-        chainTxHash: txHash,
-        confirmed: true,
-      });
+      if (result === "locked" || result === null) continue;
       relayed += 1;
       logger.info({ positionId: position.id, marketId: position.market_id }, "Relayed stake to GenLayer");
     } catch (err) {
@@ -197,23 +252,36 @@ async function relayRequestedCancellations(): Promise<number> {
   for (const market of markets) {
     if (!market.contract_market_id) continue;
     try {
-      const { amount } = await genlayerClient.cancelMarket(Number(market.contract_market_id));
-      if (BigInt(amount) > 0n) {
-        const txHash = await relayPayoutsToEscrow(market.id, [
-          { wallet: market.created_by, amountBaseUnits: amount },
-        ]);
-        await markMarketPayoutsRelayed(market.id, txHash);
-      } else {
-        await markMarketPayoutsRelayed(market.id, "no-op");
-      }
-      await insertMarketEvent({
-        marketId: market.id,
-        type: "reconciled",
-        payload: { cancelled: true, refundAmount: amount },
-        confirmed: true,
+      const result = await withRowLock(market.id, async (client) => {
+        const fresh = await client.query<{ payouts_relayed_at: string | null }>(
+          "SELECT payouts_relayed_at FROM markets WHERE id = $1",
+          [market.id]
+        );
+        if (fresh.rows[0]?.payouts_relayed_at) return null;
+
+        const { amount } = await genlayerClient.cancelMarket(Number(market.contract_market_id));
+        if (BigInt(amount) > 0n) {
+          const txHash = await relayPayoutsToEscrow(market.id, [
+            { wallet: market.created_by, amountBaseUnits: amount },
+          ]);
+          await markMarketPayoutsRelayed(market.id, txHash, client);
+        } else {
+          await markMarketPayoutsRelayed(market.id, "no-op", client);
+        }
+        await insertMarketEvent(
+          {
+            marketId: market.id,
+            type: "reconciled",
+            payload: { cancelled: true, refundAmount: amount },
+            confirmed: true,
+          },
+          client
+        );
+        return amount;
       });
+      if (result === "locked" || result === null) continue;
       relayed += 1;
-      logger.info({ marketId: market.id, amount }, "Relayed creator-requested cancellation");
+      logger.info({ marketId: market.id, amount: result }, "Relayed creator-requested cancellation");
     } catch (err) {
       logger.error({ err, marketId: market.id }, "Failed to relay requested cancellation");
     }
@@ -232,49 +300,64 @@ async function relayPendingPayouts(): Promise<number> {
     const contractMarketId = Number(market.contract_market_id);
 
     try {
-      const recipients: PayoutRecipient[] = [];
+      const result = await withRowLock(market.id, async (client) => {
+        const fresh = await client.query<{ payouts_relayed_at: string | null }>(
+          "SELECT payouts_relayed_at FROM markets WHERE id = $1",
+          [market.id]
+        );
+        if (fresh.rows[0]?.payouts_relayed_at) return null;
 
-      if (market.status === "cancelled") {
-        const { amount } = await genlayerClient.cancelMarket(contractMarketId);
-        if (BigInt(amount) > 0n) recipients.push({ wallet: market.created_by, amountBaseUnits: amount });
-      } else {
-        const positions = await listPositionsForMarket(market.id);
-        const wallets = [...new Set(positions.map((p) => p.wallet_address))];
-        for (const wallet of wallets) {
-          try {
-            const { amount } = await genlayerClient.claimPayout(contractMarketId, wallet);
-            if (BigInt(amount) > 0n) recipients.push({ wallet, amountBaseUnits: amount });
-          } catch (err) {
-            // A wallet on the losing side of a decisive verdict has a
-            // legitimate 0-payout revert — not an error worth failing the
-            // whole batch over. Try the timeout-refund path only if the
-            // market never actually reached a verdict.
-            if (!market.verdict) {
-              try {
-                const { amount } = await genlayerClient.claimTimeoutRefund(contractMarketId, wallet);
-                if (BigInt(amount) > 0n) recipients.push({ wallet, amountBaseUnits: amount });
-              } catch (refundErr) {
-                logger.debug({ err: refundErr, wallet, marketId: market.id }, "No payout/refund for wallet");
+        const recipients: PayoutRecipient[] = [];
+
+        if (market.status === "cancelled") {
+          const { amount } = await genlayerClient.cancelMarket(contractMarketId);
+          if (BigInt(amount) > 0n) recipients.push({ wallet: market.created_by, amountBaseUnits: amount });
+        } else {
+          const positions = await listPositionsForMarket(market.id);
+          const wallets = [...new Set(positions.map((p) => p.wallet_address))];
+          for (const wallet of wallets) {
+            try {
+              const { amount } = await genlayerClient.claimPayout(contractMarketId, wallet);
+              if (BigInt(amount) > 0n) recipients.push({ wallet, amountBaseUnits: amount });
+            } catch (err) {
+              // A wallet on the losing side of a decisive verdict has a
+              // legitimate 0-payout revert — not an error worth failing the
+              // whole batch over. Try the timeout-refund path only if the
+              // market never actually reached a verdict.
+              if (!market.verdict) {
+                try {
+                  const { amount } = await genlayerClient.claimTimeoutRefund(contractMarketId, wallet);
+                  if (BigInt(amount) > 0n) recipients.push({ wallet, amountBaseUnits: amount });
+                } catch (refundErr) {
+                  logger.debug({ err: refundErr, wallet, marketId: market.id }, "No payout/refund for wallet");
+                }
+              } else {
+                logger.debug({ err, wallet, marketId: market.id }, "No payout for wallet (expected on losing side)");
               }
-            } else {
-              logger.debug({ err, wallet, marketId: market.id }, "No payout for wallet (expected on losing side)");
             }
           }
         }
-      }
 
-      if (recipients.length === 0) {
-        // Nothing to relay (e.g. a cancelled market with 0 deposited, or
-        // every wallet already claimed) — still mark relayed so this pass
-        // doesn't retry forever.
-        await markMarketPayoutsRelayed(market.id, "no-op");
-        continue;
-      }
+        if (recipients.length === 0) {
+          // Nothing to relay (e.g. a cancelled market with 0 deposited, or
+          // every wallet already claimed) — still mark relayed so this pass
+          // doesn't retry forever.
+          await markMarketPayoutsRelayed(market.id, "no-op", client);
+          return { recipientCount: 0, txHash: "no-op" };
+        }
 
-      const txHash = await relayPayoutsToEscrow(market.id, recipients);
-      await markMarketPayoutsRelayed(market.id, txHash);
-      relayed += 1;
-      logger.info({ marketId: market.id, recipientCount: recipients.length, txHash }, "Relayed payouts to escrow");
+        const txHash = await relayPayoutsToEscrow(market.id, recipients);
+        await markMarketPayoutsRelayed(market.id, txHash, client);
+        return { recipientCount: recipients.length, txHash };
+      });
+      if (result === "locked" || result === null) continue;
+      if (result.recipientCount > 0) {
+        relayed += 1;
+        logger.info(
+          { marketId: market.id, recipientCount: result.recipientCount, txHash: result.txHash },
+          "Relayed payouts to escrow"
+        );
+      }
     } catch (err) {
       logger.error({ err, marketId: market.id }, "Failed to relay payouts onto escrow");
     }

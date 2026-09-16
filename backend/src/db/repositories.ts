@@ -699,15 +699,19 @@ export async function findMarketsPendingPayoutRelay(limit = 20): Promise<MarketR
   return res.rows;
 }
 
-export async function markMarketPayoutsRelayed(marketId: string, txHash: string): Promise<void> {
-  await query(`UPDATE markets SET payouts_relayed_at = now() WHERE id = $1`, [marketId]);
-  await insertMarketEvent({
-    marketId,
-    type: "payout_claimed",
-    payload: { txHash, relayedToEscrow: true },
-    chainTxHash: txHash,
-    confirmed: true,
-  });
+export async function markMarketPayoutsRelayed(marketId: string, txHash: string, client?: PoolClient): Promise<void> {
+  const runner = client ?? pool;
+  await runner.query(`UPDATE markets SET payouts_relayed_at = now() WHERE id = $1`, [marketId]);
+  await insertMarketEvent(
+    {
+      marketId,
+      type: "payout_claimed",
+      payload: { txHash, relayedToEscrow: true },
+      chainTxHash: txHash,
+      confirmed: true,
+    },
+    client
+  );
 }
 
 /**
