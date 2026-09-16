@@ -59,6 +59,59 @@ export function getRelayerClient(): GLClient | null {
   return relayerClient;
 }
 
+/**
+ * A GenVM receipt can resolve (waitForTransactionReceipt returns without
+ * throwing) even when the contract call itself errored — e.g. a Python
+ * exception inside the method body. genlayer-js surfaces that as a
+ * FINALIZED/MAJORITY_AGREE receipt whose consensus_data.leader_receipt
+ * entries carry `execution_result` + `genvm_result.stderr` for the actual
+ * failure. Found live (2026-09-15): create_market's poolDeposited arg was
+ * being sent as a JSON string instead of a numeric type, so the contract's
+ * `deposit <= u256(0)` comparison raised `TypeError: '<=' not supported
+ * between instances of 'str' and 'int'` — the receipt still "succeeded"
+ * confirming, and the caller (relayPendingPools) computed a bogus
+ * contractMarketId from a market that was never actually created. Every
+ * write whose return value (or side effect) baseRelay.ts persists into
+ * Postgres MUST check this before trusting the receipt.
+ */
+function assertReceiptSucceeded(receipt: unknown, context: string): void {
+  const leaderReceipts = (receipt as { consensus_data?: { leader_receipt?: unknown } })?.consensus_data
+    ?.leader_receipt;
+  const entries = Array.isArray(leaderReceipts) ? leaderReceipts : [];
+  for (const entry of entries) {
+    const executionResult = String((entry as { execution_result?: unknown })?.execution_result ?? "");
+    const stderr = String((entry as { genvm_result?: { stderr?: unknown } })?.genvm_result?.stderr ?? "");
+    if (executionResult.toUpperCase().includes("ERROR") || stderr.trim().length > 0) {
+      throw new Error(
+        `GenVM execution failed for ${context}: ${executionResult || "unknown error"}${stderr ? ` — ${stderr.trim().split("\n").pop()}` : ""}`
+      );
+    }
+  }
+}
+
+/**
+ * The method's actual decoded return value — confirmed live (2026-09-15)
+ * against a real create_market receipt: it lives at
+ * consensus_data.leader_receipt[i (mode === "leader")].result.payload.readable,
+ * NOT the top-level `receipt.result` (that field is the numeric
+ * TransactionResult consensus enum, e.g. 6 = MAJORITY_AGREE — a previously
+ * unverified assumption in claimPayout/claimTimeoutRefund/cancelMarket that
+ * was silently wrong; `getTransactionTrace`'s debugTraceTransaction fallback
+ * these docstrings pointed to doesn't exist on this endpoint either
+ * (`Method not found: gen_dbg_traceTransaction`), so this is now the only
+ * confirmed way to read a write method's return value).
+ */
+function getLeaderReturnValue(receipt: unknown): string | null {
+  const leaderReceipts = (receipt as { consensus_data?: { leader_receipt?: unknown } })?.consensus_data
+    ?.leader_receipt;
+  const entries = Array.isArray(leaderReceipts) ? leaderReceipts : [];
+  const leader = entries.find((e) => (e as { mode?: unknown })?.mode === "leader") as
+    | { result?: { payload?: { readable?: unknown } } }
+    | undefined;
+  const readable = leader?.result?.payload?.readable;
+  return readable === undefined || readable === null ? null : String(readable);
+}
+
 export interface ChainMarket {
   id: number;
   creator: string;
@@ -223,7 +276,11 @@ export const genlayerClient = {
       functionName: "create_market",
       args: [
         params.creatorWallet,
-        params.poolDeposited,
+        // Must be a numeric type (bigint), not a string — genlayer-js
+        // encodes a JS string arg as a quoted string in calldata, which
+        // GenVM then hands the contract as a Python `str`, not `u256`. See
+        // assertReceiptSucceeded's docstring for the real failure this caused.
+        BigInt(params.poolDeposited),
         params.question,
         params.category,
         params.horizonYears,
@@ -232,7 +289,8 @@ export const genlayerClient = {
       ],
       value: 0n,
     });
-    await genlayerClient.waitForReceipt(hash as unknown as string);
+    const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
+    assertReceiptSucceeded(receipt, `create_market (question="${params.question.slice(0, 40)}...")`);
     const contractMarketId = (await genlayerClient.getMarketCount()) - 1;
     return { txHash: hash as unknown as string, contractMarketId };
   },
@@ -249,22 +307,21 @@ export const genlayerClient = {
     const hash = await client.writeContract({
       address: env.CONTRACT_ADDRESS as Address,
       functionName: "stake",
-      args: [params.contractMarketId, params.wallet, params.side.toUpperCase(), params.amount],
+      // amount must be numeric (bigint) — see create_market's args above.
+      args: [params.contractMarketId, params.wallet, params.side.toUpperCase(), BigInt(params.amount)],
       value: 0n,
     });
+    const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
+    assertReceiptSucceeded(receipt, `stake (marketId=${params.contractMarketId}, wallet=${params.wallet})`);
     return { txHash: hash as unknown as string };
   },
 
-  // NOTE: `claimPayout` / `claimTimeoutRefund` / `cancelMarket` below read
-  // the method's u256 return value off the tx receipt via a best-effort
-  // `.result` field. This has NOT been confirmed against a real genlayer-js
-  // receipt shape for a *write* call (only getTransactionTrace's
-  // debugTraceTransaction return_data was confirmed in this codebase) — the
-  // real field may be named differently or live under decoded event/trace
-  // data instead. Verify against a real settle()+claim flow on
-  // GenLayer Studio before trusting this in production; if `.result` is
-  // wrong, `getTransactionTrace(txHash).returnData` is the confirmed
-  // fallback for reading a write method's return value.
+  // `claimPayout` / `claimTimeoutRefund` / `cancelMarket` below read the
+  // method's u256 return value via getLeaderReturnValue() — confirmed live
+  // (2026-09-15) against a real create_market receipt. See that function's
+  // docstring: the top-level receipt.result field is NOT the return value
+  // (it's the consensus-agreement enum), and getTransactionTrace's
+  // debugTraceTransaction fallback doesn't exist on this endpoint.
 
   /** Relayer-only: computes + zeroes wallet's payout ledger, returns the amount to relay onto the escrow. */
   async claimPayout(contractMarketId: number, wallet: string): Promise<{ txHash: string; amount: string }> {
@@ -277,7 +334,8 @@ export const genlayerClient = {
       value: 0n,
     });
     const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
-    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    assertReceiptSucceeded(receipt, `claim_payout (marketId=${contractMarketId}, wallet=${wallet})`);
+    const amount = getLeaderReturnValue(receipt) ?? "0";
     return { txHash: hash as unknown as string, amount };
   },
 
@@ -292,7 +350,8 @@ export const genlayerClient = {
       value: 0n,
     });
     const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
-    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    assertReceiptSucceeded(receipt, `claim_timeout_refund (marketId=${contractMarketId}, wallet=${wallet})`);
+    const amount = getLeaderReturnValue(receipt) ?? "0";
     return { txHash: hash as unknown as string, amount };
   },
 
@@ -307,7 +366,8 @@ export const genlayerClient = {
       value: 0n,
     });
     const receipt = await genlayerClient.waitForReceipt(hash as unknown as string);
-    const amount = String((receipt as { result?: unknown })?.result ?? "0");
+    assertReceiptSucceeded(receipt, `cancel_market (marketId=${contractMarketId})`);
+    const amount = getLeaderReturnValue(receipt) ?? "0";
     return { txHash: hash as unknown as string, amount };
   },
 
@@ -325,10 +385,15 @@ export const genlayerClient = {
    * return_data (the decoded verdict), eq_outputs (each validator's
    * independent nondet-block result, i.e. actual per-validator agreement,
    * not a fabricated summary), and stdout/stderr/genvm_log if present.
-   * Best-effort: some GenLayer runner versions or already-finalized old
-   * transactions may not retain a queryable trace, so this returns null on
-   * any error rather than throwing — callers must treat a null trace as
-   * "not available", not as an error condition.
+   * Best-effort: confirmed live (2026-09-15) that the current GenLayer
+   * Studio endpoint doesn't implement `gen_dbg_traceTransaction` at all
+   * ("Method not found") — this always returns null there, not just for
+   * old/unqueryable transactions as originally assumed. Kept as best-effort
+   * rather than removed in case a future runner/endpoint does implement it.
+   * A validator's independent agreement is directly observable instead via
+   * consensus_data.votes / leader_receipt on the write receipt itself (see
+   * assertReceiptSucceeded/getLeaderReturnValue) — callers must treat a
+   * null trace as "not available", not as an error condition.
    */
   async getTransactionTrace(txHash: string): Promise<{
     resultCode: number;

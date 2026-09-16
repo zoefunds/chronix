@@ -39,6 +39,8 @@ import {
   markMarketPayoutsRelayed,
   getBaseRelayWatermark,
   setBaseRelayWatermark,
+  insertFundedEvents,
+  findFundedEventsForMarket,
   listPositionsForMarket,
   getMarketById,
   insertMarketEvent,
@@ -50,42 +52,50 @@ import {
   marketIdToBytes32,
   relayPayoutsToEscrow,
   isEscrowConfigured,
-  type FundedLog,
   type PayoutRecipient,
 } from "../services/baseSepolia.js";
 import { FUND_KIND_POOL, FUND_KIND_YES, FUND_KIND_NO } from "../lib/escrowAbi.js";
 
 const MAX_BLOCK_RANGE = 2000; // conservative window per pass to stay within RPC log-range limits
 
-async function scanFundedEvents(): Promise<FundedLog[]> {
+/**
+ * Scans the next block window and persists any Funded events found into
+ * base_relay_events, durably and independent of whether anything
+ * downstream succeeds this tick. The watermark still only tracks scan
+ * progress (so a restart doesn't rescan from genesis) — it is NOT the
+ * retry mechanism any more. See migrations/010_base_relay_events.sql for
+ * the bug this replaces: matching pending markets/positions against only
+ * this tick's freshly-fetched array meant a transient downstream failure
+ * (e.g. a GenLayer RPC rate limit) permanently stranded a deposit once the
+ * watermark moved past its block.
+ */
+async function scanFundedEvents(): Promise<number> {
   const currentBlock = await getCurrentBlock();
   let fromBlock = await getBaseRelayWatermark();
   if (fromBlock === 0) fromBlock = env.BASE_SEPOLIA_ESCROW_DEPLOY_BLOCK;
-  if (fromBlock >= currentBlock) return [];
+  if (fromBlock >= currentBlock) return 0;
 
   const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE, currentBlock);
   const events = await getFundedEvents(fromBlock + 1, toBlock);
+  if (events.length > 0) await insertFundedEvents(events);
   await setBaseRelayWatermark(toBlock);
-  return events;
+  return events.length;
 }
 
 /** Relays confirmed pool-liquidity deposits onto GenLayer's create_market. */
-async function relayPendingPools(events: FundedLog[]): Promise<number> {
-  const poolEvents = events.filter((e) => e.kind === FUND_KIND_POOL);
-  if (poolEvents.length === 0) return 0;
-
+async function relayPendingPools(): Promise<number> {
   const pending = await findMarketsPendingPoolRelay();
   let relayed = 0;
 
   for (const market of pending) {
     const key = marketIdToBytes32(market.id);
-    const match = poolEvents.find((e) => e.marketId.toLowerCase() === key.toLowerCase());
+    const [match] = await findFundedEventsForMarket(key, FUND_KIND_POOL);
     if (!match) continue;
 
     try {
       const { txHash, contractMarketId } = await genlayerClient.createMarket({
         creatorWallet: market.created_by,
-        poolDeposited: match.amount.toString(),
+        poolDeposited: match.amount,
         question: market.question,
         category: market.category,
         horizonYears: Number(market.horizon_years),
@@ -96,14 +106,14 @@ async function relayPendingPools(events: FundedLog[]): Promise<number> {
       await withTransaction(async (client) => {
         await markMarketPoolRelayed(
           market.id,
-          { contractMarketId: String(contractMarketId), fundTxHash: match.txHash },
+          { contractMarketId: String(contractMarketId), fundTxHash: match.tx_hash },
           client
         );
         await insertMarketEvent(
           {
             marketId: market.id,
             type: "created",
-            payload: { contractMarketId, baseFundTxHash: match.txHash },
+            payload: { contractMarketId, baseFundTxHash: match.tx_hash },
             chainTxHash: txHash,
             confirmed: true,
           },
@@ -113,7 +123,7 @@ async function relayPendingPools(events: FundedLog[]): Promise<number> {
       relayed += 1;
       logger.info({ marketId: market.id, contractMarketId }, "Relayed pool funding to GenLayer create_market");
     } catch (err) {
-      logger.error({ err, marketId: market.id }, "Failed to relay pool funding onto GenLayer");
+      logger.error({ err, marketId: market.id }, "Failed to relay pool funding onto GenLayer — will retry next pass");
     }
   }
 
@@ -121,10 +131,7 @@ async function relayPendingPools(events: FundedLog[]): Promise<number> {
 }
 
 /** Relays confirmed YES/NO stake deposits onto GenLayer's stake. */
-async function relayPendingStakes(events: FundedLog[]): Promise<number> {
-  const stakeEvents = events.filter((e) => e.kind === FUND_KIND_YES || e.kind === FUND_KIND_NO);
-  if (stakeEvents.length === 0) return 0;
-
+async function relayPendingStakes(): Promise<number> {
   const pending = await findPositionsPendingRelay();
   let relayed = 0;
 
@@ -134,12 +141,18 @@ async function relayPendingStakes(events: FundedLog[]): Promise<number> {
 
     const key = marketIdToBytes32(position.market_id);
     const wantedKind = position.side === "yes" ? FUND_KIND_YES : FUND_KIND_NO;
-    const match = stakeEvents.find(
-      (e) =>
-        e.marketId.toLowerCase() === key.toLowerCase() &&
-        e.kind === wantedKind &&
-        e.from.toLowerCase() === position.wallet_address.toLowerCase() &&
-        e.amount.toString() === position.shares
+    const candidates = await findFundedEventsForMarket(key, wantedKind);
+    // positions.shares is NUMERIC(38,18), so pg always returns it with 18
+    // decimal places (e.g. "1000000.000000000000000000") — comparing that
+    // as a raw string against the event's plain integer amount (from a
+    // NUMERIC(78,0) column) never matches even for an exact stake amount.
+    // Compare the integer value instead. Found live (2026-09-16): this
+    // silently stranded every stake exactly the way the pre-fix watermark
+    // bug stranded pool deposits, just with no error to log — the `.find`
+    // simply never matched.
+    const wantedAmount = BigInt(position.shares.split(".")[0]);
+    const match = candidates.find(
+      (e) => e.from_address.toLowerCase() === position.wallet_address.toLowerCase() && BigInt(e.amount) === wantedAmount
     );
     if (!match) continue;
 
@@ -148,20 +161,20 @@ async function relayPendingStakes(events: FundedLog[]): Promise<number> {
         contractMarketId: Number(market.contract_market_id),
         wallet: position.wallet_address,
         side: position.side,
-        amount: match.amount.toString(),
+        amount: match.amount,
       });
-      await markPositionRelayed(position.id, match.txHash);
+      await markPositionRelayed(position.id, match.tx_hash);
       await insertMarketEvent({
         marketId: position.market_id,
         type: "stake_recorded",
-        payload: { side: position.side, shares: position.shares, baseFundTxHash: match.txHash },
+        payload: { side: position.side, shares: position.shares, baseFundTxHash: match.tx_hash },
         chainTxHash: txHash,
         confirmed: true,
       });
       relayed += 1;
       logger.info({ positionId: position.id, marketId: position.market_id }, "Relayed stake to GenLayer");
     } catch (err) {
-      logger.error({ err, positionId: position.id }, "Failed to relay stake onto GenLayer");
+      logger.error({ err, positionId: position.id }, "Failed to relay stake onto GenLayer — will retry next pass");
     }
   }
 
@@ -283,12 +296,12 @@ export async function runBaseRelayOnce(): Promise<{
   }
 
   try {
-    const events = await scanFundedEvents();
-    const poolsRelayed = await relayPendingPools(events);
-    const stakesRelayed = await relayPendingStakes(events);
+    const eventsScanned = await scanFundedEvents();
+    const poolsRelayed = await relayPendingPools();
+    const stakesRelayed = await relayPendingStakes();
     const cancellationsRelayed = await relayRequestedCancellations();
     const payoutsRelayed = await relayPendingPayouts();
-    return { eventsScanned: events.length, poolsRelayed, stakesRelayed, payoutsRelayed, cancellationsRelayed };
+    return { eventsScanned, poolsRelayed, stakesRelayed, payoutsRelayed, cancellationsRelayed };
   } catch (err) {
     if (err instanceof GenLayerNotConfiguredError) {
       return empty;

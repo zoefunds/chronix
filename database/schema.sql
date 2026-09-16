@@ -177,3 +177,18 @@ INSERT INTO base_relay_watermark (id, last_scanned_block) VALUES (1, 0) ON CONFL
 
 -- 009_market_cancel_request.sql
 ALTER TABLE markets ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;
+
+-- 010_base_relay_events.sql
+CREATE TABLE IF NOT EXISTS base_relay_events (
+    id                BIGSERIAL PRIMARY KEY,
+    market_id_bytes32 TEXT NOT NULL,
+    from_address      TEXT NOT NULL,
+    kind              SMALLINT NOT NULL,
+    amount            NUMERIC(78, 0) NOT NULL,
+    tx_hash           TEXT NOT NULL,
+    block_number      NUMERIC(78, 0) NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tx_hash, market_id_bytes32, kind)
+);
+CREATE INDEX IF NOT EXISTS base_relay_events_market_kind_idx
+    ON base_relay_events (market_id_bytes32, kind);

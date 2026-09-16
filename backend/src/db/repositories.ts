@@ -756,3 +756,45 @@ export async function setBaseRelayWatermark(blockNumber: number): Promise<void> 
     [blockNumber]
   );
 }
+
+/**
+ * Persists every ChronixEscrow Funded event scanned this tick, durably and
+ * independent of the base_relay_watermark. This is what lets
+ * relayPendingPools/relayPendingStakes retry a match on every future pass
+ * instead of only the one tick that first saw it — see
+ * database/migrations/010_base_relay_events.sql for the bug this fixes.
+ * ON CONFLICT DO NOTHING makes re-scanning an overlapping block range safe.
+ */
+export async function insertFundedEvents(
+  events: Array<{ marketId: string; from: string; kind: number; amount: bigint; txHash: string; blockNumber: number }>
+): Promise<void> {
+  if (events.length === 0) return;
+  for (const e of events) {
+    await query(
+      `INSERT INTO base_relay_events (market_id_bytes32, from_address, kind, amount, tx_hash, block_number)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (tx_hash, market_id_bytes32, kind) DO NOTHING`,
+      [e.marketId.toLowerCase(), e.from.toLowerCase(), e.kind, e.amount.toString(), e.txHash, e.blockNumber]
+    );
+  }
+}
+
+export interface BaseRelayEventRow {
+  id: string;
+  market_id_bytes32: string;
+  from_address: string;
+  kind: number;
+  amount: string;
+  tx_hash: string;
+  block_number: string;
+  created_at: Date;
+}
+
+/** All persisted Funded events for one market's bytes32 key + kind (KIND_POOL, KIND_YES, or KIND_NO). */
+export async function findFundedEventsForMarket(marketIdBytes32: string, kind: number): Promise<BaseRelayEventRow[]> {
+  const res = await query<BaseRelayEventRow>(
+    `SELECT * FROM base_relay_events WHERE market_id_bytes32 = $1 AND kind = $2 ORDER BY block_number ASC`,
+    [marketIdBytes32.toLowerCase(), kind]
+  );
+  return res.rows;
+}

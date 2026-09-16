@@ -58,7 +58,17 @@ const envSchema = z.object({
   REDIS_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(15),
 
   DEADLINE_ENFORCER_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
-  CHAIN_RECONCILER_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
+  // Drives BOTH the chain-write reconciler (chainReconciler.ts) AND the chain
+  // indexer's reconcile/discover/backfill pass (chainIndexer.ts) — each tick
+  // of the latter costs at least one gen_call (get_market_count()) even when
+  // idle. GenLayer Studio's shared public RPC caps at 5000 gen_call/day; at
+  // the old 15s default, 2 Fly machines alone cost 2 * (86400/15) = 11,520
+  // calls/day just from idle indexer ticks — over budget before any real
+  // market activity, which silently stalls the base relay job (it depends on
+  // the same GenLayer RPC for create_market/stake/settle) with no user-visible
+  // error. Raised to 180s: 2 * (86400/180) = 960 idle calls/day, leaving
+  // headroom for real reconcile/backfill/relay traffic. See MEMORY.md.
+  CHAIN_RECONCILER_INTERVAL_MS: z.coerce.number().int().positive().default(180000),
   CHAIN_SYNC_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   CHAIN_SYNC_BASE_BACKOFF_MS: z.coerce.number().int().positive().default(2000),
 });
