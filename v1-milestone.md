@@ -1,11 +1,35 @@
 # Chronix v1 milestone — USDC funding migration & infrastructure reset
 
-**Date: 2026-09-14**
+**Date: 2026-09-14 (migration), 2026-09-15 → 2026-09-16 (live E2E verification and fixes)**
+
+**V1 head: [`0f7a572fa26610631b6d78cd244afab42046e727`](https://github.com/zoefunds/chronix/commit/0f7a572fa26610631b6d78cd244afab42046e727)**
+
+Full comparison from the last pre-migration commit (`657e906`, the payout-core review fixes) to
+the V1 head — 4 commits, 50 files, +3,045/−667:
+[`657e906…0f7a572`](https://github.com/zoefunds/chronix/compare/657e906b2fae594ee6d2e075d93a844b72094ce3...0f7a572fa26610631b6d78cd244afab42046e727)
+
+| Commit | Date | What |
+|---|---|---|
+| `1944e35` | 2026-09-14 | USDC/Base Sepolia migration: GenLayer contract, Base escrow, relay, cancellation, frontend, infra reset |
+| `97a6126` | 2026-09-15 | `PLANNING.md` and `frontend/README.md` brought in line with the migration |
+| `0465feb` | 2026-09-16 | Five relay/client bugs found by live E2E testing (see [Post-migration fixes](#post-migration-fixes-found-by-live-e2e-testing)) |
+| `0f7a572` | 2026-09-16 | Advisory-lock fix for a double-relay race across the 2 Fly machines |
 
 This milestone moved Chronix's entire funding layer off native GEN and onto real USDC on Base
 Sepolia, stood up a new backend on a fresh Fly.io account after the original account was lost,
-and deployed everything fresh end-to-end. This document is the comprehensive record of what
-changed, why, and what's still open.
+deployed everything fresh end-to-end, and then verified two full market lifecycles on the live
+deployment, which surfaced and fixed six bugs the migration commit alone did not. This document
+is the comprehensive record of what changed, why, and what's still open.
+
+Where to look in the comparison for each area:
+
+| Area | Files |
+|---|---|
+| GenLayer contract | `contracts/chronix.py`, `contracts/README.md` |
+| Base escrow | `contracts/base/ChronixEscrow.sol`, `deploy.js`, `README.md` |
+| Relay | `backend/src/jobs/baseRelay.ts`, `services/baseSepolia.ts`, `genlayer/client.ts`, migrations `008` and `010` |
+| Cancellation | migration `009`, `POST /markets/:id/cancel-request` in `routes/markets.ts`, `relayRequestedCancellations()` in `baseRelay.ts` |
+| Application | `frontend/src/lib/escrow.ts` (new), `wagmi.ts`, `api.ts`, `genlayer.ts`, and the `CreateMarket` / `MarketDetail` / `Portfolio` / `AdjudicationResult` pages |
 
 ## Why
 
@@ -163,7 +187,8 @@ mirror facts already confirmed on-chain, never fabricate them.
   original `chronix-backend` app's account was lost). Deployed, 2 machines in `iad`, IPv4 +
   IPv6 allocated, `/health` passing.
 - **New Fly Postgres `chronix-markets-db`**, attached to `chronix-markets-api` via
-  `DATABASE_URL`. All 9 migrations applied.
+  `DATABASE_URL`. Migrations `001`–`009` applied at migration time; `010` was added and applied
+  on 2026-09-16 (see below).
 - **`ChronixEscrow.sol` deployed to Base Sepolia** at
   `0xeCA7236a62bf3c17e31B168692CA1871eCee91eB` (deploy block `46811025`), using a
   throwaway/testnet-only key supplied by the project owner in chat as both deployer and
@@ -208,7 +233,9 @@ mirror facts already confirmed on-chain, never fabricate them.
   pytest tests/ -v` — 35/35 passing, unchanged (payout math wasn't touched, only who calls it).
 - **Backend**: `npx tsc --noEmit` clean; `npm test` — 17/17 passing (three pre-existing tests
   updated to match the new pending-first `POST /markets` contract; the rest pass unchanged),
-  run against a real Postgres container with all 9 migrations applied.
+  run against a real Postgres container with all migrations applied (`001`–`009` at migration
+  time; re-run at 17/17 after each of the 2026-09-16 fixes with `010` included). Frontend and
+  contract suites were not re-run after the 2026-09-16 commits, which didn't touch them.
 - **Frontend**: `npx tsc -b` / `vite build` clean; `npm test` — 7/7 passing; `oxlint` clean
   (one pre-existing, unrelated warning). Verified live in-browser (Create Market page renders
   "Initial liquidity (USDC)"; Discover/Portfolio pages correctly show an empty state — "0
@@ -220,28 +247,126 @@ mirror facts already confirmed on-chain, never fabricate them.
   against the cleared database; the new GenLayer contract's `relayer_address` was read live
   and confirmed to match the backend's configured relayer key.
 
-## Known follow-up work (not done in this milestone)
+## Live E2E verification (2026-09-15 → 2026-09-16)
 
-- **`genlayer-js` write-receipt return-value shape unverified** — `claimPayout`/
-  `claimTimeoutRefund`/`cancelMarket` in `backend/src/genlayer/client.ts` read the method's
-  u256 return value via a best-effort `.result` field on the tx receipt that hasn't been
-  confirmed against a real SDK response for a *write* call. Verify against a real
-  settle()+claim flow on GenLayer Studio before relying on this in a live payout; the
-  documented fallback is `getTransactionTrace(txHash).returnData`.
-- **No full production dry-run of the relay loop yet** — the relay job, escrow contract, and
-  new GenLayer contract have each been verified individually (contract linted/tested, escrow
-  deployed and reachable, backend healthy, relayer address matched), but no market has yet been
-  created → funded → staked → settled → claimed end-to-end against the live deployment. Do
-  that as the first real smoke test before directing real users at it.
-- **Vercel frontend production env vars** — `VITE_API_URL`/`VITE_CONTRACT_ADDRESS`/
-  `VITE_CHRONIX_ESCROW_ADDRESS`/etc. were updated in local `frontend/.env`, but this milestone
-  did not touch the Vercel production deployment's env vars or trigger a production redeploy —
-  `chronix-app.vercel.app` may still be serving the pre-migration build. Needs a Vercel env var
-  update (remove + re-add, no update-in-place via the CLI) and `vercel --prod --yes` +
-  `vercel alias set` per the existing [`README.md`](README.md#deployment) deploy routine.
-- **`withdrawUnallocated` manual fallback for the pending+funded+cancelled edge case** — if a
-  user funds a `pending_chain` market on Base Sepolia and the creator requests cancellation
-  before the relay job mirrors that deposit onto GenLayer, the deposit is stuck in the escrow
-  with no GenLayer market ever created to compute a refund against. This is a narrow race
-  (requires cancellation between deposit and the next ~20s relay tick) with no automated
-  recovery yet — the owner-only `ChronixEscrow.withdrawUnallocated` is the manual escape hatch.
+Run against the live deployment (`chronix-markets-api.fly.dev`, GenLayer contract
+`0x9e09470D7e3D0cf044E27060Db57f39517b76984`, escrow `0xeCA7236a62bf3c17e31B168692CA1871eCee91eB`)
+using two throwaway wallets, with every user-facing step signed by the user wallet: SIWE login,
+`POST /markets`, `ChronixEscrow.fund()`, `submit_evidence_pointer`, `claim()`. No owner or admin
+call was part of either flow. The relayer's own GenLayer writes (`create_market`, `stake`,
+`cancel_market`) were driven by the backend relay job, not by hand.
+
+**Test 1 — create → fund pool → stake YES → evidence.** Market `da72b8a0-02ea-4e88-b55f-4d48fa08aa0d`
+("Will a fusion power plant achieve sustained net energy gain at commercial scale before
+2030?"), GenLayer id `1`.
+- Pool: 1 USDC `fund(KIND_POOL)` (`0xcedc16dc…`, block 46852001) → relayed to `create_market`;
+  on-chain `get_market(1)` shows `pool_deposited: 1000000`, `status: active`.
+- Stake: 1 USDC `fund(KIND_YES)` from a second wallet (`0x55070e1f…`, block 46888381) → relayed to
+  `stake`; on-chain `total_yes: 1000000`.
+- Evidence: `submit_evidence_pointer` signed directly by the creator wallet
+  (`0x81b88b7c…`, `execution_result: SUCCESS`), then mirrored to Postgres.
+
+**Test 2 — create → fund pool → cancel request → refund claim.** Market
+`3dd818c9-9dbf-464b-afe4-fed632cbc8af` ("…room-temperature ambient-pressure superconductor…"),
+GenLayer id `4`.
+- Pool: 1 USDC `fund(KIND_POOL)` (`0x411be85d…`, block 46888675) → relayed to `create_market`.
+- Creator called `POST /markets/:id/cancel-request`; the relay job drove `cancel_market` on
+  GenLayer and pushed the refund onto `ChronixEscrow.setPayouts`; market reached `cancelled`.
+- `GET /markets/:id/claimable/:wallet` returned `1000000`; the creator called
+  `ChronixEscrow.claim()` directly (`0xbac47f74…`, block 46888776, status 1). Escrow
+  `getClaimable` afterwards: `0`. This exercised the full payout round trip, including reading
+  `cancel_market`'s return value from the receipt.
+
+**What the E2E runs did not cover.** The minimum market horizon is 3 years
+(`VALID_HORIZONS = (3, 5, 10, 0)`), so `request_adjudication` → `settle` → `claim_payout` for a
+decided verdict, and `claim_timeout_refund`, were not run live. Those paths are covered by the 35
+pure-logic contract tests only.
+
+## Post-migration fixes found by live E2E testing
+
+Commits `0465feb` and `0f7a572`. The migration commit passed lint, typecheck and all tests; these
+were only visible against real chain behaviour. The contract logic itself was not the problem —
+all six are in the backend's relay/client layer or its configuration.
+
+1. **GenLayer RPC daily quota exhausted by idle polling.** `CHAIN_RECONCILER_INTERVAL_MS` drives
+   both the chain-write reconciler and the chain indexer; each indexer tick costs at least one
+   `gen_call` (`get_market_count()`). At the 15s default, 2 machines cost ~11,520 calls/day idle
+   against GenLayer Studio's shared 5,000/day cap, so relay writes failed with `Rate limit
+   exceeded: 5000 requests per day`. Default raised to 180s (≈960 idle calls/day) in
+   `backend/src/config.ts` and `.env.example`, and set as a Fly secret on `chronix-markets-api`.
+2. **Deposits stranded forever by the scan watermark.** `baseRelay.ts` advanced
+   `base_relay_watermark` every tick regardless of downstream success and only matched pending
+   markets/positions against that tick's freshly fetched events, so one transient GenLayer
+   failure permanently lost a deposit. New migration
+   [`010_base_relay_events.sql`](database/migrations/010_base_relay_events.sql) persists every
+   scanned `Funded` event in `base_relay_events`, and `relayPendingPools`/`relayPendingStakes`
+   match against that table on every pass, so failures retry until they succeed.
+3. **Numeric arguments sent as strings.** `create_market`'s `poolDeposited` and `stake`'s `amount`
+   were passed to `genlayer-js` as JS strings, encoded as quoted strings in calldata, so GenVM
+   raised `TypeError: '<=' not supported between instances of 'str' and 'int'` inside the
+   contract on every real call. Now passed as `BigInt`. Verified: `create_market` succeeded and
+   `get_market` returned `pool_deposited: 1000000`.
+4. **Wrong receipt field, and silent execution failures.** `claimPayout`/`claimTimeoutRefund`/
+   `cancelMarket` read `receipt.result` as the payout amount; that field is the consensus enum
+   (`6` = `MAJORITY_AGREE`). The real return value is at
+   `consensus_data.leader_receipt[mode=leader].result.payload.readable`
+   (`getLeaderReturnValue`). A receipt that resolved with a GenVM execution error was also
+   treated as success, which persisted a bogus `contract_market_id: -1`; every write whose result
+   is stored now goes through `assertReceiptSucceeded`. The documented
+   `getTransactionTrace` fallback does not work on this endpoint (see follow-ups).
+5. **Stake deposits never matched their position.** `positions.shares` is `NUMERIC(38,18)`, so
+   `pg` returns `"1000000.000000000000000000"`; the match against the event's plain integer
+   amount used string equality and never succeeded. Compared as `BigInt` now.
+6. **Double-relay race across the 2 Fly machines.** `baseRelay.ts` runs on every machine with no
+   coordination, so both could submit a real `create_market` for the same pending market and only
+   one Postgres update would win, leaving a duplicate on-chain market with no matching row. Each
+   row's full GenLayer write + Postgres update now runs inside a transaction-scoped advisory lock
+   (`pg_try_advisory_xact_lock(hashtext(id))`, non-blocking, in `withRowLock`), applied to pool,
+   stake, requested-cancellation and payout relays. This holds one pooled DB connection for the
+   duration of an on-chain write, which is acceptable at this system's volume and should be
+   revisited under real load.
+
+## Test-data cleanup
+
+- Three markets stranded by bug 2 (`4fe0087f…`, `559ab01b…`, `661a81c0…`) held 11 USDC in the
+  escrow with no GenLayer market. Recovered with `ChronixEscrow.withdrawUnallocated`
+  (owner-only; the relayer key is also the escrow owner): `0x229049d2…`, `0xe9390fcb…`,
+  `0x324d0cbb…`. Their Postgres rows were deleted; they never reached GenLayer, so nothing
+  re-creates them.
+- GenLayer contracts are immutable, so the duplicate/diagnostic on-chain markets (ids `0`, `2`,
+  `3`: one manual diagnostic `create_market` call and two duplicates from bug 6) cannot be removed.
+  The chain indexer treats on-chain state as truth and re-backfills them as Postgres rows if
+  deleted. They carry no escrow deposit under their own keys, so no funds are involved. Production
+  currently has 5 market rows: the 2 E2E markets above plus these 3 backfilled artifacts. Test 1's
+  market still holds its live 2 USDC (pool + stake) in the escrow.
+- The throwaway test wallets' keys were discarded after the runs.
+
+## Known follow-up work
+
+- **Settlement and timeout-refund paths unverified live.** See "What the E2E runs did not cover"
+  above. `claim_payout` and `claim_timeout_refund` use the same `getLeaderReturnValue` helper as
+  the verified `cancel_market` path, but have not been run against a settled market.
+- **`getTransactionTrace` always returns `null`.** The GenLayer Studio endpoint does not
+  implement `gen_dbg_traceTransaction` (`Method not found`), so `GET /markets/:id/trace` and the
+  execution-trace panel on the Adjudication Result page never have data. Failures are handled
+  gracefully, but the feature is effectively inactive on this endpoint.
+- **SIWE nonces are in-memory per machine.** With 2 machines behind the load balancer,
+  `/auth/nonce` and `/auth/verify` can land on different machines, giving an intermittent
+  `401 Nonce missing or expired`, seen repeatedly during E2E runs (a retry succeeds). Needs a
+  shared nonce store (Postgres) or sticky routing.
+- **`KEEPER_INTERVAL_MS` is dead config.** Defined in `config.ts` and `.env.example`, referenced
+  nowhere; the keeper actions run via the chain reconciler.
+- **`VITE_CHRONIX_ESCROW_ADDRESS` appears unused in frontend source.** The escrow address comes
+  from `GET /markets/:id/escrow` at funding time; the variable is set in Vercel and
+  `.env.example` but nothing reads it.
+- **Pending+funded+cancelled edge case.** If a user funds a `pending_chain` market and the creator
+  requests cancellation before the relay job mirrors that deposit onto GenLayer, the deposit has no
+  GenLayer market to compute a refund against. Narrow race, no automated recovery; the owner-only
+  `withdrawUnallocated` is the manual escape hatch (used for real in the cleanup above).
+- **Relay holds a DB connection across an on-chain write** (the advisory-lock tradeoff in bug 6);
+  revisit if pending volume grows.
+
+Resolved since the original write-up of this milestone: the `genlayer-js` write-receipt
+return-value shape (bug 4), the missing full relay dry-run (the E2E runs above), and the Vercel
+production env vars/deployment (all `VITE_*` variables were updated on 2026-09-14 and the live
+`chronix-app.vercel.app` bundle references the current GenLayer contract and backend).
